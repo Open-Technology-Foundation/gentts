@@ -24,7 +24,9 @@ gentts -p openai essay.md            # different provider
 gentts -F essay.md                   # regenerate over an existing MP3
 ```
 
-Nothing is regenerated if the output already exists — `-F` forces it.
+A file is skipped when its audio is **current** — the MP3 exists and is as new as the Markdown
+(equal timestamps, as `-T` sets, count as current). A `.md` newer than its MP3 regenerates
+automatically; `-F` forces regeneration regardless.
 
 ---
 

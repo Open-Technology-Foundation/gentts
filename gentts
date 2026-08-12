@@ -1014,9 +1014,14 @@ def process_file(md_path, args):
   info(f'  Title: {meta.get("title", "-")}\n  Lang:  {cfg["language"]}')
 
   if output_path.exists() and not args.force and not args.preview:
-    info(f'  SKIPPED: {output_path} exists ({format_duration(get_audio_duration(output_path))}). '
-         'Use --force to regenerate.')
-    return
+    # Same-or-newer output is current; regenerate only when the md is newer
+    # (stale, matching the -l check). Same-timestamp outputs come from -T.
+    if md_path.stat().st_mtime <= output_path.stat().st_mtime:
+      info(f'  SKIPPED: {output_path} is current '
+           f'({format_duration(get_audio_duration(output_path))}). '
+           'Use --force to regenerate.')
+      return
+    info('  Source is newer than existing audio: regenerating')
 
   if meta['audio'].get('strip_h1'):
     body = strip_leading_h1(body)
@@ -1243,7 +1248,7 @@ def main():
   parser.add_argument('--preview', action='store_true',
                       help='show processed text and first chunk, no API call')
   parser.add_argument('-F', '--force', action='store_true',
-                      help='regenerate even if the output exists')
+                      help='regenerate even if the output exists and is current')
   parser.add_argument('--stamp', action='store_true',
                       help='write audio.file/duration back into the frontmatter')
   parser.add_argument('-T', '--timestamp', action='store_true',
