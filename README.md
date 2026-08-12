@@ -300,7 +300,7 @@ No virtualenv. Stdlib plus PyYAML, HTTP over `urllib`.
 ## Install on PATH
 
 ```bash
-symlink -S /ai/scripts/Audio
+sudo ln -s "$PWD/gentts" /usr/local/bin/gentts
 ```
 
 ## Licence
