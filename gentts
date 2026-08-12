@@ -1,0 +1,1312 @@
+#!/usr/bin/env python3
+"""gentts - generate TTS audio from Markdown files.
+
+Reads Markdown, strips everything unspeakable, converts structure into pause
+markers, renders those markers for the chosen TTS provider, synthesises in
+chunks and concatenates to a single MP3.
+
+Per-file settings come from YAML frontmatter; CLI flags override frontmatter.
+
+  gentts essay.md                       # -> essay.mp3
+  gentts -l chapters/                   # list files and audio status
+  gentts --preview essay.md             # show processed text, no API call
+  gentts -p openai -O out/ chapters/    # batch, OpenAI voice, into out/
+  gentts --stamp essay.md               # write audio.file/duration back
+  gentts -T essay.md                    # give the MP3 the .md's mtime
+
+Frontmatter (all optional):
+
+  ---
+  title: In Search of Dharma
+  subtitle: A natural history of ethics
+  author: Biksu Okusi
+  date: 2026-08-01
+  language: en
+  audio:
+    provider: google          # google | openai | grok | compatible
+    voice: en-AU-Chirp3-HD-Charon
+    gender: male              # male | female (picks voice from the table)
+    lang_code: en-AU
+    output: ../html/audio/dharma.mp3
+    lexicon: ./book_lexicon.json
+    speaking_rate: 0.95
+    preamble: true            # speak title/subtitle/author/date first
+    skip: false               # exclude this file from batch runs
+    timestamp: false          # give the MP3 the Markdown file's mtime
+    markers: punctuation      # punctuation | tags (non-SSML providers)
+    url: ...                  # 'compatible' provider only
+    model: ...
+    key_env: ...
+    chunk_limit: ...
+
+Inline fences in the body:
+
+  <!--audio stop-->  ... excluded ...  <!--audio restart-->
+
+Requires: python3.12+, PyYAML, ffmpeg, ffprobe; gcloud ADC for the Google
+provider (gcloud auth application-default login).
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import datetime
+import html
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+try:
+  import yaml
+except ImportError:
+  print("gentts: error: PyYAML not installed (apt install python3-yaml)", file=sys.stderr)
+  sys.exit(18)
+
+VERSION = '1.0.0'
+SCRIPT_NAME = Path(__file__).name
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+# --- Provider configuration ---
+
+# Google Cloud TTS (REST + Application Default Credentials).
+# Chirp3-HD voices require principal-asserting credentials; API keys are rejected.
+GOOGLE_TTS_URL = 'https://texttospeech.googleapis.com/v1/text:synthesize'
+GOOGLE_ADC_FILE = Path.home() / '.config/gcloud/application_default_credentials.json'
+GOOGLE_CHUNK_LIMIT = 3500  # bytes, under the 5000-byte SSML limit (break tags add overhead)
+GOOGLE_VOICES = {
+  ('en', 'male'):   'en-AU-Chirp3-HD-Charon',
+  ('en', 'female'): 'en-AU-Chirp3-HD-Aoede',
+  ('id', 'male'):   'id-ID-Chirp3-HD-Puck',
+  ('id', 'female'): 'id-ID-Chirp3-HD-Autonoe',
+}
+GOOGLE_LANG_CODES = {'en': 'en-AU', 'id': 'id-ID'}
+
+# OpenAI-shaped /audio/speech backends. 'compatible' takes its values from
+# frontmatter or CLI, so any service using the same request shape works.
+OPENAI_COMPATIBLE = {
+  'openai': {
+    'url': 'https://api.openai.com/v1/audio/speech',
+    'model': 'tts-1-hd',
+    'voice': 'onyx',          # deep, warm - good for essays
+    'key_env': 'OPENAI_API_KEY',
+    'chunk_limit': 4000,      # chars, under the 4096 limit
+    'send_speed': True,
+    'markers': 'punctuation',
+  },
+  'grok': {
+    'url': 'https://api.x.ai/v1/audio/speech',
+    'model': 'grok-tts',
+    'voice': 'tara',
+    'key_env': 'XAI_API_KEY',
+    'chunk_limit': 14000,     # chars, under the 15000 limit
+    'send_speed': False,
+    'markers': 'tags',
+  },
+  'compatible': {
+    'url': None,
+    'model': None,
+    'voice': None,
+    'key_env': None,
+    'chunk_limit': 4000,
+    'send_speed': False,
+    'markers': 'punctuation',
+  },
+}
+PROVIDERS = ('google', *OPENAI_COMPATIBLE)
+
+DEFAULT_SPEAKING_RATE = 0.95
+RETRY_HTTP_CODES = {429, 500, 502, 503, 504}
+SILENCE_SECONDS = 0.5
+
+VERBOSE = 1
+
+
+# --- Messaging ---
+
+class TTSError(Exception):
+  """Recoverable failure while talking to a TTS provider."""
+
+
+def info(*args):
+  if VERBOSE:
+    print(*args, flush=True)
+
+
+def warn(msg):
+  print(f'{SCRIPT_NAME}: warning: {msg}', file=sys.stderr, flush=True)
+
+
+def die(code, msg):
+  print(f'{SCRIPT_NAME}: error: {msg}', file=sys.stderr, flush=True)
+  sys.exit(code)
+
+
+# --- Frontmatter ---
+
+# The closing delimiter is anchored to a line start so an empty block (--- / ---)
+# parses as empty frontmatter rather than leaking through as two horizontal rules.
+FRONTMATTER_RE = re.compile(r'\A---[ \t]*\r?\n(.*?)^(?:---|\.\.\.)[ \t]*\r?$\r?\n?',
+                            re.DOTALL | re.MULTILINE)
+
+
+def read_markdown(path):
+  """Return (meta, body). meta['audio'] is always a dict."""
+  raw = path.read_text(encoding='utf-8')
+  meta, body = {}, raw
+
+  m = FRONTMATTER_RE.match(raw)
+  if m:
+    try:
+      parsed = yaml.safe_load(m.group(1))
+    except yaml.YAMLError as e:
+      die(4, f'{path}: invalid YAML frontmatter: {e}')
+    if parsed is None:
+      parsed = {}
+    if not isinstance(parsed, dict):
+      die(4, f'{path}: frontmatter is not a mapping')
+    meta = parsed
+    body = raw[m.end():]
+
+  audio = meta.get('audio') or {}
+  if not isinstance(audio, dict):
+    die(4, f'{path}: frontmatter "audio" is not a mapping')
+  meta['audio'] = audio
+  return meta, body
+
+
+def write_frontmatter(path, meta, body):
+  """Rewrite path with meta as frontmatter, body unchanged."""
+  dumped = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True, default_flow_style=False)
+  path.write_text(f'---\n{dumped}---\n\n{body.lstrip(chr(10))}', encoding='utf-8')
+
+
+# --- Content preprocessing ---
+
+def strip_audio_excluded_regions(text):
+  """Remove regions fenced by <!--audio stop--> ... <!--audio restart-->.
+
+  An unclosed 'stop' excludes everything to the end of the content (used to
+  fence off long reference/notes sections). 'start' is accepted as a synonym
+  for 'restart'. Matching is lenient: case insensitive and tolerant of
+  internal whitespace. Reports only when content was actually excised."""
+  marker = re.compile(r'<!--\s*audio\s+(stop|restart|start)\s*-->', re.IGNORECASE)
+  out = []
+  pos = 0
+  emitting = True
+  removed = 0
+  for m in marker.finditer(text):
+    if emitting:
+      out.append(text[pos:m.start()])
+    else:
+      removed += m.start() - pos
+    emitting = (m.group(1).lower() != 'stop')
+    pos = m.end()
+  if emitting:
+    out.append(text[pos:])
+  else:
+    removed += len(text) - pos
+  if removed:
+    info(f'  ◉ audio: excised {removed:,} chars in excluded region(s)')
+  return ''.join(out)
+
+
+def strip_fenced_code(text):
+  """Remove ``` and ~~~ fenced code blocks.
+
+  Indented (4-space) code blocks are deliberately NOT stripped: in prose,
+  indentation is far more often a quotation or a verse than it is code."""
+  text = re.sub(r'^[ \t]*```.*?(?:^[ \t]*```[ \t]*$|\Z)', '', text, flags=re.DOTALL | re.MULTILINE)
+  text = re.sub(r'^[ \t]*~~~.*?(?:^[ \t]*~~~[ \t]*$|\Z)', '', text, flags=re.DOTALL | re.MULTILINE)
+  return text
+
+
+def strip_custom_tags(text):
+  """Remove non-speakable inline tags and block elements."""
+  # Single tags with no closing form
+  text = re.sub(r'<image\s[^>]*>', '', text, flags=re.IGNORECASE)
+  text = re.sub(r'<vidframe\s[^>]*>', '', text, flags=re.IGNORECASE)
+  text = re.sub(r'<IKLAN>', '', text, flags=re.IGNORECASE)
+
+  # Block elements whose contents are not speech
+  for tag in ('style', 'script', 'table', 'pre', 'audio', 'video', 'figure', 'iframe'):
+    text = re.sub(rf'<{tag}[^>]*>.*?</{tag}>', '', text, flags=re.DOTALL | re.IGNORECASE)
+
+  text = re.sub(r'<section[^>]*class="music-player"[^>]*>.*?</section>', '', text,
+                flags=re.DOTALL | re.IGNORECASE)
+
+  # Stage directions like [Cut to...], [On-screen:...]
+  text = re.sub(r'\[(?:Cut to|On-screen|Fade|Title|Music|Sound)[^\]]*\]', '', text,
+                flags=re.IGNORECASE)
+
+  return text
+
+
+def strip_md_tables(text):
+  """Drop Markdown pipe tables (two or more consecutive lines starting with |)."""
+  lines = text.split('\n')
+  out = []
+  run = []
+  for line in lines:
+    if line.lstrip().startswith('|'):
+      run.append(line)
+      continue
+    if len(run) == 1:
+      out.append(run[0])
+    run = []
+    out.append(line)
+  if len(run) == 1:
+    out.append(run[0])
+  return '\n'.join(out)
+
+
+def strip_footnote_defs(text):
+  """Drop footnote definitions ([^1]: ...) and their indented continuations."""
+  lines = text.split('\n')
+  out = []
+  dropping = False
+  for line in lines:
+    if re.match(r'^\[\^[^\]]+\]:', line):
+      dropping = True
+      continue
+    if dropping and (not line.strip() or re.match(r'^[ \t]{2,}\S', line)):
+      if not line.strip():
+        dropping = False
+        out.append(line)
+      continue
+    dropping = False
+    out.append(line)
+  return '\n'.join(out)
+
+
+def strip_wikilinks(text):
+  """[[target|label]] -> label; [[target]] -> target."""
+  text = re.sub(r'\[\[([^\]|]+)\|([^\]]+)\]\]', r'\2', text)
+  text = re.sub(r'\[\[([^\]]+)\]\]', r'\1', text)
+  return text
+
+
+def strip_list_markers(text):
+  """Remove bullet and ordered-list markers, keeping the item text.
+
+  Runs before emphasis stripping so a '* item' bullet is never mistaken for
+  an unterminated emphasis marker."""
+  text = re.sub(r'^[ \t]*[-*+][ \t]+', '', text, flags=re.MULTILINE)
+  text = re.sub(r'^[ \t]*\d+[.)][ \t]+', '', text, flags=re.MULTILINE)
+  return text
+
+
+def strip_markdown(text):
+  """Remove markdown formatting markers."""
+  text = re.sub(r'\*\*\*([^*]+?)\*\*\*', r'\1', text)
+  text = re.sub(r'\*\*([^*]+?)\*\*', r'\1', text)
+  text = re.sub(r'(?<!\*)\*([^*\n]+?)\*(?!\*)', r'\1', text)
+  text = re.sub(r'___([^_]+?)___', r'\1', text)
+  text = re.sub(r'__([^_]+?)__', r'\1', text)
+  text = re.sub(r'(?<!\w)_([^_]+?)_(?!\w)', r'\1', text)
+
+  # Links and images
+  text = re.sub(r'!\[[^\]]*\]\([^)]+\)', '', text)
+  text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+
+  # Footnote references: [^1], [1], [2] ...
+  text = re.sub(r'\[\^?[^\]]*\d+[^\]]*\]', '', text)
+
+  return text
+
+
+def strip_html_tags(text):
+  """Remove remaining HTML tags, keeping text content."""
+  text = re.sub(r'<a[^>]*class="footnote-ref"[^>]*>.*?</a>', '', text,
+                flags=re.DOTALL | re.IGNORECASE)
+  text = re.sub(r'<sup>\d+</sup>', '', text, flags=re.IGNORECASE)
+  text = re.sub(r'<section[^>]*class="footnotes"[^>]*>.*?</section>', '', text,
+                flags=re.DOTALL | re.IGNORECASE)
+  text = re.sub(r'<a[^>]*href="#?fn\d+"[^>]*>.*?</a>', '', text,
+                flags=re.DOTALL | re.IGNORECASE)
+  text = re.sub(r'<figcaption[^>]*>(.*?)</figcaption>', r'\1', text,
+                flags=re.DOTALL | re.IGNORECASE)
+  text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+  text = re.sub(r'<[^>]+>', '', text)
+  return text
+
+
+def process_headings(text):
+  """Convert headings to plain text bracketed by pause markers."""
+  # Setext headings first (they consume the underline)
+  text = re.sub(r'^(?![ \t]*$)(.+)\n=+[ \t]*$', r'[PAUSE_LONG]\1[PAUSE_MEDIUM]',
+                text, flags=re.MULTILINE)
+  text = re.sub(r'^(?![ \t]*$)(.+)\n-{2,}[ \t]*$', r'[PAUSE_MEDIUM]\1[PAUSE_SHORT]',
+                text, flags=re.MULTILINE)
+  # ATX headings, deepest first so '###' never matches inside '####'.
+  # Trailing whitespace is matched as [ \t]* rather than \s*: \s eats the
+  # newline, which would swallow the blank line separating heading from body.
+  atx = r'^#{%s}[ \t]+(.+?)[ \t]*#*[ \t]*$'
+  text = re.sub(atx % '4,6', r'[PAUSE_MEDIUM]\1[PAUSE_SHORT]', text, flags=re.MULTILINE)
+  text = re.sub(atx % '3', r'[PAUSE_MEDIUM]\1[PAUSE_SHORT]', text, flags=re.MULTILINE)
+  text = re.sub(atx % '2', r'[PAUSE_LONG]\1[PAUSE_MEDIUM]', text, flags=re.MULTILINE)
+  text = re.sub(atx % '1', r'[PAUSE_LONG]\1[PAUSE_MEDIUM]', text, flags=re.MULTILINE)
+  return text
+
+
+def process_blockquotes(text):
+  """Mark blockquoted text for prosody changes."""
+  lines = text.split('\n')
+  result = []
+  in_quote = False
+
+  for line in lines:
+    stripped = line.strip()
+    if stripped.startswith('>'):
+      if not in_quote:
+        result.append('[QUOTE_START]')
+        in_quote = True
+      result.append(stripped[1:].lstrip())
+    else:
+      if in_quote:
+        result.append('[QUOTE_END]')
+        in_quote = False
+      result.append(line)
+
+  if in_quote:
+    result.append('[QUOTE_END]')
+
+  return '\n'.join(result)
+
+
+def process_hr(text):
+  """Convert horizontal rules to long pause markers."""
+  text = re.sub(r'^[ \t]*-{3,}[ \t]*$', '[PAUSE_XLONG]', text, flags=re.MULTILINE)
+  text = re.sub(r'^[ \t]*\*{3,}[ \t]*$', '[PAUSE_XLONG]', text, flags=re.MULTILINE)
+  text = re.sub(r'^[ \t]*_{3,}[ \t]*$', '[PAUSE_XLONG]', text, flags=re.MULTILINE)
+  return text
+
+
+def strip_leading_h1(body):
+  """Drop a leading H1, which a spoken preamble would otherwise duplicate."""
+  return re.sub(r'\A(?:[ \t]*\n)*#[ \t]+[^\n]*\n', '', body)
+
+
+def strip_misc_symbols(text):
+  """Remove non-speakable symbols like footnote return markers."""
+  text = text.replace('↩︎', '').replace('↩', '')
+  # Linguistic root/radical sign (e.g. "√dhṛ"): visual notation the voice would
+  # otherwise read as "square root". Drop it; the root word stands on its own.
+  text = text.replace('√', '')
+  return text
+
+
+def clean_whitespace(text):
+  """Collapse excessive whitespace."""
+  text = re.sub(r'\n{3,}', '\n\n', text)
+  text = re.sub(r'[ \t]{2,}', ' ', text)
+  text = '\n'.join(line.strip() for line in text.split('\n'))
+  return text.strip()
+
+
+def preprocess_content(content):
+  """Raw Markdown body -> clean text carrying [PAUSE_*] / [QUOTE_*] markers."""
+  text = content.replace('\r\n', '\n').replace('\r', '\n')
+
+  # Stage 1: honour audio fences, then strip unspeakable blocks
+  text = strip_audio_excluded_regions(text)
+  text = strip_fenced_code(text)
+  text = strip_custom_tags(text)
+
+  # Stage 2: structural elements -> markers
+  text = process_hr(text)
+  text = strip_md_tables(text)
+  text = process_blockquotes(text)
+  text = strip_list_markers(text)
+  text = process_headings(text)
+
+  # Stage 3: strip formatting
+  text = strip_footnote_defs(text)
+  text = strip_wikilinks(text)
+  text = strip_markdown(text)
+  text = strip_html_tags(text)
+
+  # Stage 4: decode and tidy
+  text = html.unescape(text)
+  text = strip_misc_symbols(text)
+  text = clean_whitespace(text)
+
+  return text
+
+
+# --- Lexicon ---
+
+def load_lexicon(path):
+  """Load a pronunciation lexicon, dropping _comment keys."""
+  if path is None or not path.exists():
+    return {}
+  try:
+    data = json.loads(path.read_text(encoding='utf-8'))
+  except (OSError, json.JSONDecodeError) as e:
+    die(4, f'{path}: unreadable lexicon: {e}')
+  return {k: v for k, v in data.items() if not k.startswith('_')}
+
+
+def resolve_lexicon_path(md_path, audio_meta, cli_lexicon, language):
+  """--lexicon > frontmatter audio.lexicon > <md dir>/tts_lexicon.json > bundled.
+
+  An explicitly chosen lexicon always applies. The bundled fallback holds
+  foreign terms respelled for an English voice, so it applies to English
+  content only. `audio.lexicon: false` disables lexicon substitution."""
+  if cli_lexicon:
+    p = Path(cli_lexicon).expanduser()
+    if not p.exists():
+      die(3, f'lexicon not found: {p}')
+    return p
+  fm = audio_meta.get('lexicon')
+  if fm is False:
+    return None
+  if fm:
+    p = (md_path.parent / str(fm)).expanduser()
+    if not p.exists():
+      die(3, f'{md_path}: lexicon not found: {p}')
+    return p
+  local = md_path.parent / 'tts_lexicon.json'
+  if local.exists():
+    return local
+  bundled = SCRIPT_DIR / 'tts_lexicon.json'
+  return bundled if bundled.exists() and language == 'en' else None
+
+
+# --- SSML generation (Google) ---
+
+def escape_ssml(text):
+  """Escape special XML characters. [PAUSE_*] markers survive untouched."""
+  text = text.replace('&', '&amp;')
+  text = text.replace('<', '&lt;')
+  text = text.replace('>', '&gt;')
+  text = text.replace('"', '&quot;')
+  text = text.replace("'", '&apos;')
+  return text
+
+
+def apply_lexicon_ssml(text, lexicon):
+  """Wrap known terms in SSML pronunciation tags.
+
+  A string value is IPA, emitted as <phoneme alphabet="ipa" ph="...">.
+  A {"say": "..."} value is emitted as <sub alias="...">, a plain respelling,
+  for tokens Chirp 3 HD's normaliser would otherwise spell out as an initialism
+  (e.g. the Sanskrit root dhr -> "dree"): that classifier overrides <phoneme>
+  but not a <sub> respelling. Verified on en-AU-Chirp3-HD-Charon, 2026-06-21.
+  """
+  for term, val in sorted(lexicon.items(), key=lambda x: -len(x[0])):
+    pattern = re.compile(r'\b(' + re.escape(term) + r')\b', re.IGNORECASE)
+    if isinstance(val, dict):
+      alias = escape_ssml(str(val.get('say', '')))
+      # Leading micro-break: Chirp otherwise glues the substituted alias onto
+      # the preceding word ("root dhṛ" -> "rootdree"). 50ms restores the word
+      # boundary without an audible pause. Verified by ear, 2026-06-21.
+      text = pattern.sub(
+        lambda m, a=alias: f'<break time="50ms"/><sub alias="{a}">{m.group(1)}</sub>', text)
+    else:
+      text = pattern.sub(
+        lambda m, ph=val: f'<phoneme alphabet="ipa" ph="{ph}">{m.group(1)}</phoneme>', text)
+  return text
+
+
+def text_to_ssml(text, lexicon):
+  """Marker text -> SSML."""
+  # NOTE: Chirp 3 HD honours <break> and <prosody> despite Google's docs listing
+  # only <phoneme>/<p>/<s>/<sub>/<say-as> as supported. Verified empirically on
+  # okusi3 (2026-06-21): a 4000ms break produced a measured ~4.8s gap, and
+  # pitch="-6st" dropped F0 from 106.7 to 92.0 Hz (~-2.6st actual - prosody pitch
+  # is honoured but attenuated to ~40% of the requested shift). Do not "simplify"
+  # these tags away on the strength of the documentation.
+  text = escape_ssml(text)
+
+  text = text.replace('[PAUSE_XLONG]', '<break time="2000ms"/>')
+  text = text.replace('[PAUSE_LONG]', '<break time="1200ms"/>')
+  text = text.replace('[PAUSE_MEDIUM]', '<break time="800ms"/>')
+  text = text.replace('[PAUSE_SHORT]', '<break time="400ms"/>')
+
+  text = text.replace('[QUOTE_START]', '<prosody rate="95%" pitch="-1st">')
+  text = text.replace('[QUOTE_END]', '</prosody>')
+
+  # Slight pause after sentence-ending punctuation. The whitespace is a
+  # lookahead, not consumed: eating it would destroy the first newline of a
+  # \n\n pair and the paragraph break below would never fire (the original
+  # generate_tts.py bug - paragraphs got 500ms instead of ~1.9s).
+  text = re.sub(r'([.!?])(?=\s)', r'\1<break time="330ms"/>', text)
+  # Paragraph and line breaks
+  # 1000ms here + 330ms sentence break + 200ms newline = ~1.5s between
+  # paragraphs (author-tuned 2026-08-12; 1400ms read as too slow, 300ms
+  # sentence breaks as slightly too fast).
+  text = text.replace('\n\n', '<break time="1000ms"/>\n')
+  text = text.replace('\n', '<break time="200ms"/>\n')
+
+  if lexicon:
+    text = apply_lexicon_ssml(text, lexicon)
+
+  return f'<speak><break time="1500ms"/>{text}</speak>'
+
+
+# --- Marker rendering (non-SSML providers) ---
+
+def text_to_punctuation(text):
+  """Markers -> punctuation and newlines (OpenAI-style backends)."""
+  text = text.replace('[PAUSE_XLONG]', '\n\n...\n\n')
+  text = text.replace('[PAUSE_LONG]', '\n\n')
+  text = text.replace('[PAUSE_MEDIUM]', '\n')
+  text = text.replace('[PAUSE_SHORT]', '... ')
+  text = text.replace('[QUOTE_START]', '\n')
+  text = text.replace('[QUOTE_END]', '\n')
+  return text
+
+
+def text_to_tags(text):
+  """Markers -> [pause] tags (Grok-style backends)."""
+  text = text.replace('[PAUSE_XLONG]', '[long-pause] [long-pause]')
+  text = text.replace('[PAUSE_LONG]', '[long-pause]')
+  text = text.replace('[PAUSE_MEDIUM]', '[pause]')
+  text = text.replace('[PAUSE_SHORT]', '[pause]')
+  text = text.replace('[QUOTE_START]', '[pause]')
+  text = text.replace('[QUOTE_END]', '[pause]')
+  return text
+
+
+# --- Chunking ---
+
+def split_on_sentences(text, max_chars):
+  """Split text on sentence boundaries when it exceeds max_chars."""
+  if len(text) <= max_chars:
+    return [text]
+
+  sentences = re.split(r'(?<=[.!?])\s+', text)
+  chunks = []
+  current = ''
+
+  for sent in sentences:
+    # A single sentence longer than the limit has no sentence boundary left to
+    # split on; hard-wrap it so no emitted chunk can exceed max_chars (which
+    # would otherwise make the TTS provider reject the request).
+    if len(sent) > max_chars:
+      if current.strip():
+        chunks.append(current.strip())
+        current = ''
+      chunks.extend(textwrap.wrap(sent, max_chars, break_long_words=True, break_on_hyphens=False))
+      continue
+    if current and len(current) + len(sent) + 1 > max_chars:
+      chunks.append(current.strip())
+      current = sent
+    else:
+      current = f'{current} {sent}' if current else sent
+
+  if current.strip():
+    chunks.append(current.strip())
+
+  return chunks
+
+
+def chunk_text(text, max_chars):
+  """Split at paragraph boundaries, then sentence boundaries."""
+  chunks = []
+  current = ''
+
+  for para in re.split(r'\n\n+', text):
+    para = para.strip()
+    if not para:
+      continue
+
+    if len(para) > max_chars:
+      if current.strip():
+        chunks.append(current.strip())
+        current = ''
+      chunks.extend(split_on_sentences(para, max_chars))
+      continue
+
+    if current and len(current) + len(para) + 2 > max_chars:
+      chunks.append(current.strip())
+      current = para
+    else:
+      current = f'{current}\n\n{para}' if current else para
+
+  if current.strip():
+    chunks.append(current.strip())
+
+  return chunks
+
+
+def chunk_ssml(ssml_text):
+  """Chunk SSML respecting the byte limit, splitting on break tags."""
+  inner = ssml_text
+  if inner.startswith('<speak>'):
+    inner = inner[7:]
+  if inner.endswith('</speak>'):
+    inner = inner[:-8]
+
+  def ssml_bytes(text):
+    return len(f'<speak>{text}</speak>'.encode('utf-8'))
+
+  segments = re.split(r'(<break time="\d+ms"/>)', inner)
+
+  chunks = []
+  current = ''
+
+  for seg in segments:
+    test = current + seg
+    if ssml_bytes(test) > GOOGLE_CHUNK_LIMIT:
+      if not current.strip() or ssml_bytes(seg) > GOOGLE_CHUNK_LIMIT:
+        if current.strip():
+          chunks.append(f'<speak>{current.strip()}</speak>')
+          current = ''
+        for sent in re.split(r'(?<=[.!?])\s+', seg):
+          if current and ssml_bytes(current + ' ' + sent) > GOOGLE_CHUNK_LIMIT:
+            if current.strip():
+              chunks.append(f'<speak>{current.strip()}</speak>')
+            current = sent
+          else:
+            current = f'{current} {sent}' if current else sent
+      else:
+        chunks.append(f'<speak>{current.strip()}</speak>')
+        current = seg
+    else:
+      current = test
+
+  if current.strip():
+    chunks.append(f'<speak>{current.strip()}</speak>')
+
+  return balance_prosody_tags(chunks)
+
+
+def balance_prosody_tags(chunks):
+  """Ensure each chunk has balanced <prosody> open/close tags."""
+  prosody_pattern = re.compile(r'<prosody[^>]*>')
+  result = []
+  carry_tag = None  # prosody tag to re-open in the next chunk
+
+  for chunk in chunks:
+    inner = chunk
+    if inner.startswith('<speak>'):
+      inner = inner[7:]
+    if inner.endswith('</speak>'):
+      inner = inner[:-8]
+
+    if carry_tag:
+      inner = carry_tag + inner
+      carry_tag = None
+
+    opens = prosody_pattern.findall(inner)
+    closes = inner.count('</prosody>')
+
+    if len(opens) > closes:
+      carry_tag = opens[-1]
+      inner += '</prosody>'
+
+    result.append(f'<speak>{inner}</speak>')
+
+  return result
+
+
+# --- HTTP ---
+
+def post_json(url, payload, headers, timeout=120, retries=5):
+  """POST JSON with exponential backoff on transient failures."""
+  delay = 2.0
+  last = 'request failed'
+
+  for attempt in range(retries + 1):
+    req = urllib.request.Request(url, data=payload, headers=headers, method='POST')
+    try:
+      with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+    except urllib.error.HTTPError as e:
+      body = e.read().decode('utf-8', errors='replace')
+      last = f'HTTP {e.code}: {body[:300]}'
+      if e.code not in RETRY_HTTP_CODES or attempt == retries:
+        raise TTSError(last) from None
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+      last = f'network error: {e}'
+      if attempt == retries:
+        raise TTSError(last) from None
+
+    info(f'    retry {attempt + 1}/{retries} in {delay:.0f}s ({last[:80]})')
+    time.sleep(delay)
+    delay = min(delay * 2, 30.0)
+
+  raise TTSError(last)
+
+
+# --- Provider: Google ---
+
+def google_credentials():
+  """Return (access_token, quota_project) from Application Default Credentials."""
+  if not shutil.which('gcloud'):
+    die(18, 'gcloud not found; required for the google provider')
+  if not GOOGLE_ADC_FILE.exists():
+    die(3, f'no ADC credentials at {GOOGLE_ADC_FILE}; '
+           'run: gcloud auth application-default login')
+  try:
+    token = subprocess.run(['gcloud', 'auth', 'application-default', 'print-access-token'],
+                           capture_output=True, text=True, check=True).stdout.strip()
+  except subprocess.CalledProcessError as e:
+    die(1, f'failed to obtain access token: {e.stderr.strip()}')
+  if not token:
+    die(1, 'gcloud returned an empty access token')
+
+  try:
+    adc = json.loads(GOOGLE_ADC_FILE.read_text(encoding='utf-8'))
+  except (OSError, json.JSONDecodeError) as e:
+    die(1, f'failed to read {GOOGLE_ADC_FILE}: {e}')
+  project = adc.get('quota_project_id')
+  if not project:
+    die(19, f'no quota_project_id in {GOOGLE_ADC_FILE}; '
+            'run: gcloud auth application-default set-quota-project PROJECT')
+  return token, project
+
+
+def synthesize_google(ssml_chunks, tmpdir, cfg):
+  """Synthesise SSML chunks via the Google Cloud TTS REST API."""
+  token, project = google_credentials()
+  headers = {
+    'Authorization': f'Bearer {token}',
+    'x-goog-user-project': project,
+    'Content-Type': 'application/json',
+  }
+
+  chunk_files = []
+  for i, ssml in enumerate(ssml_chunks):
+    info(f'  chunk {i + 1}/{len(ssml_chunks)} ({len(ssml.encode("utf-8"))} bytes)...')
+    payload = json.dumps({
+      'input': {'ssml': ssml},
+      'voice': {'languageCode': cfg['lang_code'], 'name': cfg['voice']},
+      'audioConfig': {'audioEncoding': 'MP3', 'speakingRate': cfg['speaking_rate']},
+    }).encode('utf-8')
+
+    body = post_json(GOOGLE_TTS_URL, payload, headers)
+    try:
+      audio = base64.b64decode(json.loads(body)['audioContent'])
+    except (json.JSONDecodeError, KeyError, ValueError) as e:
+      raise TTSError(f'malformed response for chunk {i + 1}: {e}') from None
+    if not audio:
+      raise TTSError(f'empty audio returned for chunk {i + 1}')
+
+    chunk_path = os.path.join(tmpdir, f'chunk_{i:04d}.mp3')
+    with open(chunk_path, 'wb') as f:
+      f.write(audio)
+    chunk_files.append(chunk_path)
+
+  return chunk_files
+
+
+# --- Provider: OpenAI-compatible ---
+
+def synthesize_openai_compatible(text_chunks, tmpdir, cfg):
+  """Synthesise text chunks via an OpenAI-shaped /audio/speech endpoint."""
+  api_key = os.environ.get(cfg['key_env'], '')
+  if not api_key:
+    die(19, f'{cfg["key_env"]} not set in environment')
+
+  headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}
+
+  chunk_files = []
+  for i, text in enumerate(text_chunks):
+    info(f'  chunk {i + 1}/{len(text_chunks)} ({len(text)} chars)...')
+    body = {
+      'model': cfg['model'],
+      'input': text,
+      'voice': cfg['voice'],
+      'response_format': 'mp3',
+    }
+    if cfg['send_speed']:
+      body['speed'] = cfg['speaking_rate']
+
+    audio = post_json(cfg['url'], json.dumps(body).encode('utf-8'), headers)
+    if not audio:
+      raise TTSError(f'empty audio returned for chunk {i + 1}')
+
+    chunk_path = os.path.join(tmpdir, f'chunk_{i:04d}.mp3')
+    with open(chunk_path, 'wb') as f:
+      f.write(audio)
+    chunk_files.append(chunk_path)
+
+  return chunk_files
+
+
+# --- Audio assembly ---
+
+def concatenate_audio(chunk_files, output_path, tmpdir):
+  """Concatenate MP3 chunks with a short silence between them."""
+  silence_path = os.path.join(tmpdir, 'silence.mp3')
+  subprocess.run([
+    'ffmpeg', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=24000:cl=mono',
+    '-t', str(SILENCE_SECONDS), '-c:a', 'libmp3lame', '-q:a', '4', silence_path,
+  ], capture_output=True, check=True)
+
+  list_path = os.path.join(tmpdir, 'filelist.txt')
+  with open(list_path, 'w', encoding='utf-8') as f:
+    for i, chunk in enumerate(chunk_files):
+      f.write(f"file '{chunk}'\n")
+      if i < len(chunk_files) - 1:
+        f.write(f"file '{silence_path}'\n")
+
+  subprocess.run([
+    'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+    '-i', list_path, '-c', 'copy', str(output_path),
+  ], capture_output=True, check=True)
+
+
+def get_audio_duration(filepath):
+  """MP3 duration in seconds via ffprobe, 0.0 if unreadable."""
+  try:
+    result = subprocess.run(
+      ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+       '-of', 'default=noprint_wrappers=1:nokey=1', str(filepath)],
+      capture_output=True, text=True, check=True)
+    return float(result.stdout.strip())
+  except (subprocess.CalledProcessError, ValueError, FileNotFoundError):
+    return 0.0
+
+
+def format_duration(seconds):
+  """Seconds as m:ss."""
+  return f'{int(seconds) // 60}:{int(seconds) % 60:02d}'
+
+
+# --- Settings resolution ---
+
+def format_date(val):
+  """Frontmatter date -> spoken form ('August 2026')."""
+  if val is None:
+    return ''
+  if isinstance(val, (datetime.date, datetime.datetime)):
+    return val.strftime('%B %Y')
+  s = str(val).strip()
+  for fmt, out in (('%Y-%m-%d', '%B %Y'), ('%Y-%m', '%B %Y'), ('%Y', '%Y')):
+    try:
+      return datetime.datetime.strptime(s, fmt).strftime(out)
+    except ValueError:
+      continue
+  return s
+
+
+def pick(cli_value, fm_value, default=None):
+  """CLI flag > frontmatter > default."""
+  if cli_value is not None:
+    return cli_value
+  if fm_value is not None:
+    return fm_value
+  return default
+
+
+def resolve_settings(md_path, meta, args):
+  """Merge CLI flags, frontmatter and defaults into one provider config."""
+  audio = meta['audio']
+  language = str(pick(args.language, meta.get('language'), 'en')).lower()
+  provider = str(pick(args.provider, audio.get('provider'), 'google')).lower()
+  if provider not in PROVIDERS:
+    die(22, f'{md_path}: unknown provider {provider!r} (choose from {", ".join(PROVIDERS)})')
+
+  cfg = {
+    'provider': provider,
+    'language': language,
+    'speaking_rate': float(pick(args.speaking_rate, audio.get('speaking_rate'),
+                                DEFAULT_SPEAKING_RATE)),
+    'preamble': bool(pick(None, audio.get('preamble'), True)),
+  }
+
+  if provider == 'google':
+    gender = str(pick(args.gender, audio.get('gender'), 'male')).lower()
+    voice = pick(args.voice, audio.get('voice'))
+    if voice is None:
+      if (language, gender) not in GOOGLE_VOICES:
+        die(22, f'{md_path}: no default voice for language={language!r} gender={gender!r}; '
+                'set audio.voice and audio.lang_code in frontmatter, or use --voice/--lang-code')
+      voice = GOOGLE_VOICES[(language, gender)]
+    lang_code = pick(args.lang_code, audio.get('lang_code'), GOOGLE_LANG_CODES.get(language))
+    if not lang_code:
+      die(22, f'{md_path}: no lang_code for language={language!r}; '
+              'set audio.lang_code or use --lang-code')
+    cfg.update(voice=voice, gender=gender, lang_code=lang_code, chunk_limit=GOOGLE_CHUNK_LIMIT)
+  else:
+    preset = OPENAI_COMPATIBLE[provider]
+    cfg.update(
+      url=pick(args.url, audio.get('url'), preset['url']),
+      model=pick(args.model, audio.get('model'), preset['model']),
+      voice=pick(args.voice, audio.get('voice'), preset['voice']),
+      key_env=pick(args.key_env, audio.get('key_env'), preset['key_env']),
+      chunk_limit=int(pick(args.chunk_limit, audio.get('chunk_limit'), preset['chunk_limit'])),
+      markers=str(pick(args.markers, audio.get('markers'), preset['markers'])).lower(),
+      send_speed=preset['send_speed'],
+    )
+    for key in ('url', 'model', 'voice', 'key_env'):
+      if not cfg[key]:
+        die(22, f'{md_path}: provider {provider!r} requires audio.{key} '
+                f'in frontmatter or --{key.replace("_", "-")}')
+    if cfg['markers'] not in ('punctuation', 'tags'):
+      die(22, f'{md_path}: audio.markers must be "punctuation" or "tags"')
+
+  return cfg
+
+
+def resolve_output(md_path, meta, args):
+  """--output > frontmatter audio.output > --outdir > sibling .mp3."""
+  if args.output:
+    return Path(args.output).expanduser()
+  fm_out = meta['audio'].get('output')
+  if fm_out:
+    p = Path(str(fm_out)).expanduser()
+    # A bare filename names the file but not the directory, so --outdir still
+    # supplies the directory. That lets a repository declare its published
+    # audio filename without hardcoding anyone's deployment path.
+    if args.outdir and p.parent == Path('.'):
+      return Path(args.outdir).expanduser() / p.name
+    return (md_path.parent / p).expanduser()
+  if args.outdir:
+    return Path(args.outdir).expanduser() / f'{md_path.stem}.mp3'
+  return md_path.with_suffix('.mp3')
+
+
+def build_preamble(meta):
+  """Spoken title / subtitle / author / date block.
+
+  Each field may be overridden under audio:, for documents whose spoken
+  identity differs from their document identity - a book part titled
+  "Preface" published on a site as "0: In Search of Dharma", say."""
+  audio = meta['audio']
+  parts = []
+  title = audio.get('title', meta.get('title'))
+  if title:
+    parts.append(f'{title}.\n\n')
+  subtitle = audio.get('subtitle', meta.get('subtitle'))
+  if subtitle:
+    parts.append(f'{subtitle}.\n\n')
+
+  author = audio.get('author', meta.get('author'))
+  date_str = format_date(audio.get('date', meta.get('date')))
+  if author and date_str:
+    parts.append(f'By {author}, {date_str}.\n\n')
+  elif author:
+    parts.append(f'By {author}.\n\n')
+  elif date_str:
+    parts.append(f'{date_str}.\n\n')
+
+  return ''.join(parts)
+
+
+# --- Per-file processing ---
+
+def process_file(md_path, args):
+  """Preprocess one Markdown file and synthesise its audio."""
+  meta, body = read_markdown(md_path)
+
+  info(f'\n{"=" * 60}\nFile:  {md_path}')
+
+  if meta['audio'].get('skip') and not args.force:
+    info('  SKIPPED: audio.skip is set')
+    return
+
+  cfg = resolve_settings(md_path, meta, args)
+  output_path = resolve_output(md_path, meta, args)
+  info(f'  Title: {meta.get("title", "-")}\n  Lang:  {cfg["language"]}')
+
+  if output_path.exists() and not args.force and not args.preview:
+    info(f'  SKIPPED: {output_path} exists ({format_duration(get_audio_duration(output_path))}). '
+         'Use --force to regenerate.')
+    return
+
+  if meta['audio'].get('strip_h1'):
+    body = strip_leading_h1(body)
+  source = (build_preamble(meta) if cfg['preamble'] else '') + body
+  text = preprocess_content(source)
+  if not text.strip():
+    info('  SKIPPED: no speakable content after preprocessing')
+    return
+
+  info(f'  Content: {len(text):,} chars ({len(text) / 1000:.1f}K)')
+
+  # Render markers for the provider, then chunk
+  if cfg['provider'] == 'google':
+    lexicon = load_lexicon(
+      resolve_lexicon_path(md_path, meta['audio'], args.lexicon, cfg['language']))
+    chunks = chunk_ssml(text_to_ssml(text, lexicon))
+  else:
+    rendered = text_to_tags(text) if cfg['markers'] == 'tags' else text_to_punctuation(text)
+    chunks = chunk_text(rendered, cfg['chunk_limit'])
+
+  if args.preview:
+    info(f'\n--- Preprocessed text ({cfg["language"]}) ---')
+    info(text[:3000])
+    if len(text) > 3000:
+      info(f'\n... [{len(text) - 3000:,} more chars] ...')
+    info(f'\n--- {cfg["provider"]} chunk 1/{len(chunks)} ---')
+    info(chunks[0][:2000])
+    if len(chunks[0]) > 2000:
+      info(f'\n... [{len(chunks[0]) - 2000:,} more chars in chunk 1] ...')
+    info(f'\nTotal chunks: {len(chunks)}  ->  would write {output_path}')
+    return
+
+  info(f'  Provider: {cfg["provider"]}  Voice: {cfg["voice"]}  Chunks: {len(chunks)}')
+  output_path.parent.mkdir(parents=True, exist_ok=True)
+
+  tmpdir = tempfile.mkdtemp(prefix='gentts_')
+  try:
+    if cfg['provider'] == 'google':
+      chunk_files = synthesize_google(chunks, tmpdir, cfg)
+    else:
+      chunk_files = synthesize_openai_compatible(chunks, tmpdir, cfg)
+
+    if len(chunk_files) == 1:
+      shutil.move(chunk_files[0], str(output_path))
+    else:
+      concatenate_audio(chunk_files, output_path, tmpdir)
+  except TTSError as e:
+    die(1, f'{md_path}: {e}')
+  except subprocess.CalledProcessError as e:
+    die(1, f'{md_path}: ffmpeg failed: {e.stderr.decode("utf-8", "replace")[:300]}')
+  finally:
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+  duration = get_audio_duration(output_path)
+  size_mb = output_path.stat().st_size / (1024 * 1024)
+  info(f'  Written: {output_path}\n  Duration: {format_duration(duration)}  Size: {size_mb:.1f} MB')
+
+  if args.stamp:
+    meta['audio']['file'] = os.path.relpath(output_path, md_path.parent)
+    meta['audio']['duration'] = int(duration)
+    meta['audio']['duration_hms'] = format_duration(duration)
+    write_frontmatter(md_path, meta, body)
+    info(f'  Frontmatter stamped: audio.file = {meta["audio"]["file"]}')
+
+  # Runs after --stamp on purpose: the point is mp3 mtime == md mtime so
+  # staleness is visible later, and stamping rewrites the md. Statting the
+  # md here captures its final mtime, stamped or not.
+  if args.timestamp or meta['audio'].get('timestamp'):
+    src = md_path.stat()
+    # ns= copies the timestamp exactly; float seconds lose the last ~100ns,
+    # which would leave the md nominally newer than its own audio.
+    os.utime(output_path, ns=(src.st_atime_ns, src.st_mtime_ns))
+    info(f'  Timestamp: mtime set to {md_path.name}\'s '
+         f'({datetime.datetime.fromtimestamp(src.st_mtime):%Y-%m-%d %H:%M:%S})')
+
+
+def list_files(paths, args):
+  """Table of Markdown files with audio status."""
+  print(f'{"File":<48} {"Chars":>8} {"Lang":>5} {"Provider":>10} {"Audio":>10}')
+  print('-' * 86)
+
+  total_chars = 0
+  with_audio = 0
+  eligible = 0
+  stale = 0
+
+  for md_path in paths:
+    meta, body = read_markdown(md_path)
+    audio = meta['audio']
+    language = str(pick(args.language, meta.get('language'), 'en')).lower()
+    provider = str(pick(args.provider, audio.get('provider'), 'google')).lower()
+    skipped = bool(audio.get('skip'))
+    output_path = resolve_output(md_path, meta, args)
+    # A stamped audio.file records where the audio actually landed, which may
+    # differ from where this invocation's flags would put it.
+    if not output_path.exists() and audio.get('file'):
+      stamped = (md_path.parent / str(audio['file'])).expanduser()
+      if stamped.exists():
+        output_path = stamped
+
+    if skipped:
+      status = 'skip'
+    elif output_path.exists():
+      # An md newer than its mp3 means the audio no longer matches the text.
+      # Meaningful when generation used -T, which syncs the two mtimes.
+      if md_path.stat().st_mtime > output_path.stat().st_mtime:
+        status = 'stale'
+        stale += 1
+      else:
+        status = format_duration(get_audio_duration(output_path))
+      with_audio += 1
+    else:
+      status = '-'
+
+    if not skipped:
+      eligible += 1
+      total_chars += len(body)
+
+    marker = 'x' if skipped else ' '
+    name = str(md_path)
+    if len(name) > 45:
+      name = '...' + name[-42:]
+    print(f'[{marker}] {name:<45} {len(body):>8,} {language:>5} {provider:>10} {status:>10}')
+
+  print('-' * 86)
+  summary = f'Total: {len(paths)} files, {eligible} eligible, {with_audio} with audio'
+  if stale:
+    summary += f', {stale} stale'
+  print(summary)
+  print(f'Total content: {total_chars:,} chars ({total_chars / 1000:.0f}K)')
+
+
+def collect_inputs(items, recursive):
+  """Expand file and directory arguments into a sorted list of Markdown files."""
+  out = []
+  for item in items:
+    p = Path(item).expanduser()
+    if p.is_dir():
+      found = sorted(p.rglob('*.md') if recursive else p.glob('*.md'))
+      if not found:
+        warn(f'no .md files in {p}')
+      out.extend(found)
+    elif p.is_file():
+      out.append(p)
+    else:
+      die(3, f'not found: {p}')
+
+  seen = set()
+  unique = []
+  for p in out:
+    key = p.resolve()
+    if key not in seen:
+      seen.add(key)
+      unique.append(p)
+  return unique
+
+
+def check_dependencies():
+  for cmd in ('ffmpeg', 'ffprobe'):
+    if not shutil.which(cmd):
+      die(18, f'required command not found: {cmd} (apt install ffmpeg)')
+
+
+def main():
+  global VERBOSE
+
+  parser = argparse.ArgumentParser(
+    prog=SCRIPT_NAME,
+    description='Generate TTS audio from Markdown files.',
+    formatter_class=argparse.RawDescriptionHelpFormatter,
+    epilog=textwrap.dedent(f"""\
+      frontmatter (YAML, all keys optional):
+
+        title                document title, spoken in the preamble
+        subtitle             spoken after the title
+        author               spoken as "By <author>"
+        date                 YYYY-MM-DD, YYYY-MM, YYYY or a YAML date;
+                             spoken as "August 2026"
+        language             content language key (default: en)
+
+        audio:               mapping of synthesis settings
+          title              spoken title, if not the document title
+          subtitle           spoken subtitle
+          author             spoken author
+          date               spoken date
+          strip_h1           drop a leading H1 the preamble already says
+          provider           {' | '.join(PROVIDERS)}
+                             (default: google)
+          voice              explicit voice name; overrides the voice table
+          gender             male | female (default: male)
+          lang_code          e.g. en-AU; defaults per language
+          output             output MP3 path, relative to this file;
+                             a bare filename combines with --outdir
+          lexicon            pronunciation JSON path, or false to disable
+          speaking_rate      default {DEFAULT_SPEAKING_RATE}
+          preamble           speak title/subtitle/author/date (default: true)
+          skip               exclude this file from batch runs
+          timestamp          give the MP3 the Markdown file's mtime
+          markers            punctuation | tags (non-SSML providers)
+          url                endpoint URL
+          model              model name
+          key_env            environment variable holding the API key
+          chunk_limit        max chars per request
+
+      The 'compatible' provider has no presets: url, model, voice and key_env
+      must all be given, in frontmatter or on the command line.
+
+      written back by --stamp:
+
+          file               path of the generated MP3
+          duration           length in seconds
+          duration_hms       length as m:ss
+
+      Settings resolve as: CLI flag > frontmatter audio.* > built-in default.
+      Body fences <!--audio stop--> ... <!--audio restart--> exclude regions.
+      See README.md for providers, lexicon format and chunking.
+    """))
+  parser.add_argument('inputs', nargs='*', metavar='FILE|DIR',
+                      help='Markdown files, or directories to scan for *.md')
+  parser.add_argument('-l', '--list', action='store_true',
+                      help='list files and audio status, generate nothing')
+  parser.add_argument('-r', '--recursive', action='store_true',
+                      help='recurse into directory arguments')
+  parser.add_argument('--preview', action='store_true',
+                      help='show processed text and first chunk, no API call')
+  parser.add_argument('-F', '--force', action='store_true',
+                      help='regenerate even if the output exists')
+  parser.add_argument('--stamp', action='store_true',
+                      help='write audio.file/duration back into the frontmatter')
+  parser.add_argument('-T', '--timestamp', action='store_true',
+                      help="set the output MP3's mtime to the input file's mtime")
+
+  parser.add_argument('-p', '--provider', choices=PROVIDERS, help='TTS provider')
+  parser.add_argument('-g', '--gender', choices=['male', 'female'],
+                      help='voice gender for the google voice table')
+  parser.add_argument('-v', '--voice', help='explicit voice name')
+  parser.add_argument('--lang-code', dest='lang_code', help='language code, e.g. en-AU')
+  parser.add_argument('--language', help='content language key, e.g. en or id')
+  parser.add_argument('--speaking-rate', dest='speaking_rate', type=float,
+                      help=f'speaking rate (default {DEFAULT_SPEAKING_RATE})')
+  parser.add_argument('--lexicon', help='pronunciation lexicon JSON')
+
+  parser.add_argument('--url', help='endpoint URL (compatible provider)')
+  parser.add_argument('-m', '--model', help='model name (compatible provider)')
+  parser.add_argument('--key-env', dest='key_env',
+                      help='environment variable holding the API key')
+  parser.add_argument('--chunk-limit', dest='chunk_limit', type=int,
+                      help='max characters per request (non-google providers)')
+  parser.add_argument('--markers', choices=['punctuation', 'tags'],
+                      help='how pause markers render for non-SSML providers')
+
+  parser.add_argument('-o', '--output', help='output MP3 path (single input only)')
+  parser.add_argument('-O', '--outdir', help='output directory for batch runs')
+  parser.add_argument('-q', '--quiet', action='store_true', help='suppress progress output')
+  parser.add_argument('-V', '--version', action='version', version=f'{SCRIPT_NAME} {VERSION}')
+  args = parser.parse_args()
+
+  if args.quiet:
+    VERBOSE = 0
+
+  if not args.inputs:
+    parser.print_help()
+    sys.exit(0)
+
+  paths = collect_inputs(args.inputs, args.recursive)
+  if not paths:
+    die(3, 'no input files')
+
+  if args.list:
+    list_files(paths, args)
+    return
+
+  if args.output and len(paths) > 1:
+    die(22, '--output takes a single input file; use --outdir for batch runs')
+  if args.preview and len(paths) > 1:
+    die(22, '--preview takes a single input file (it would dump every file\'s text)')
+
+  check_dependencies()
+
+  for md_path in paths:
+    process_file(md_path, args)
+
+  if len(paths) > 1:
+    info(f'\nDone. {len(paths)} files processed.')
+
+
+if __name__ == '__main__':
+  try:
+    main()
+  except KeyboardInterrupt:
+    sys.exit(130)
+
+#fin
