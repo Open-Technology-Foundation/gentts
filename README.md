@@ -1,6 +1,5 @@
 # gentts — Markdown to speech
 
-**Location:** `/ai/scripts/Audio/gentts/`
 **Version:** 1.0.0
 **Status:** Active
 
@@ -8,9 +7,8 @@ Generates MP3 audio from Markdown files. Strips everything unspeakable, converts
 structure into pause markers, renders those markers for the chosen TTS provider, synthesises in
 chunks and concatenates the result.
 
-Generalised from `garydean.id`'s `tts/generate_tts.py`, which read essays from a SQLite `essays`
-table. Here the per-file settings come from YAML frontmatter instead, so the tool works on any
-Markdown tree — a book, a docs directory, a single essay.
+Per-file settings come from YAML frontmatter, so the tool works on any Markdown tree — a book,
+a docs directory, a single essay.
 
 ---
 

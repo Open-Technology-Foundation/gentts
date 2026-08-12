@@ -521,8 +521,8 @@ def apply_lexicon_ssml(text, lexicon):
 def text_to_ssml(text, lexicon):
   """Marker text -> SSML."""
   # NOTE: Chirp 3 HD honours <break> and <prosody> despite Google's docs listing
-  # only <phoneme>/<p>/<s>/<sub>/<say-as> as supported. Verified empirically on
-  # okusi3 (2026-06-21): a 4000ms break produced a measured ~4.8s gap, and
+  # only <phoneme>/<p>/<s>/<sub>/<say-as> as supported. Verified empirically
+  # (2026-06-21): a 4000ms break produced a measured ~4.8s gap, and
   # pitch="-6st" dropped F0 from 106.7 to 92.0 Hz (~-2.6st actual - prosody pitch
   # is honoured but attenuated to ~40% of the requested shift). Do not "simplify"
   # these tags away on the strength of the documentation.
@@ -538,8 +538,8 @@ def text_to_ssml(text, lexicon):
 
   # Slight pause after sentence-ending punctuation. The whitespace is a
   # lookahead, not consumed: eating it would destroy the first newline of a
-  # \n\n pair and the paragraph break below would never fire (the original
-  # generate_tts.py bug - paragraphs got 500ms instead of ~1.9s).
+  # \n\n pair and the paragraph break below would never fire, collapsing
+  # paragraph pauses to 500ms.
   text = re.sub(r'([.!?])(?=\s)', r'\1<break time="330ms"/>', text)
   # Paragraph and line breaks
   # 1000ms here + 330ms sentence break + 200ms newline = ~1.5s between
