@@ -305,6 +305,10 @@ No virtualenv. Stdlib plus PyYAML, HTTP over `urllib`.
 symlink -S /ai/scripts/Audio
 ```
 
+## Licence
+
+GPL-3.0 — see [LICENSE](LICENSE).
+
 ## Exit codes
 
 | Code | Meaning |
