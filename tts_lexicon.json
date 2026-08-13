@@ -77,6 +77,9 @@
   "bhinneka": "bhinˈneka",
   "gotong royong": "ɡotoŋ ˈrojoŋ",
 
+  "Tuwhiri": "tuˈfiɾi",
+
+
   "_comment_respell": "Object values emit <sub> respelling instead of IPA <phoneme>. Use for tokens Chirp spells out as initialisms (all-consonant clusters); the normaliser overrides <phoneme> but not <sub>.",
   "dhṛ": {"say": "dree"},
   "ṛta": {"say": "ritta"},
