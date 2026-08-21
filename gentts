@@ -10,6 +10,7 @@ Per-file settings come from YAML frontmatter; CLI flags override frontmatter.
   gentts essay.md                       # -> essay.mp3
   gentts -l chapters/                   # list files and audio status
   gentts --preview essay.md             # show processed text, no API call
+  gentts --dump-text essay.txt essay.md # write spoken text to file, no API call
   gentts -p openai -O out/ chapters/    # batch, OpenAI voice, into out/
   gentts --stamp essay.md               # write audio.file/duration back
   gentts -T essay.md                    # give the MP3 the .md's mtime
@@ -567,6 +568,17 @@ def text_to_punctuation(text):
   return text
 
 
+def text_to_plain(text):
+  """Markers -> paragraph breaks: the spoken text as plain prose.
+
+  Used by --dump-text so downstream tools (forced alignment, captions) can
+  align the exact words that were synthesised, preamble included."""
+  text = re.sub(r'\[(?:PAUSE_(?:XLONG|LONG|MEDIUM|SHORT)|QUOTE_START|QUOTE_END)\]', '\n\n', text)
+  text = re.sub(r'[ \t]+\n', '\n', text)
+  text = re.sub(r'\n{3,}', '\n\n', text)
+  return text.strip() + '\n'
+
+
 def text_to_tags(text):
   """Markers -> [pause] tags (Grok-style backends)."""
   text = text.replace('[PAUSE_XLONG]', '[long-pause] [long-pause]')
@@ -1013,7 +1025,7 @@ def process_file(md_path, args):
   output_path = resolve_output(md_path, meta, args)
   info(f'  Title: {meta.get("title", "-")}\n  Lang:  {cfg["language"]}')
 
-  if output_path.exists() and not args.force and not args.preview:
+  if output_path.exists() and not args.force and not (args.preview or args.dump_text):
     # Same-or-newer output is current; regenerate only when the md is newer
     # (stale, matching the -l check). Same-timestamp outputs come from -T.
     if md_path.stat().st_mtime <= output_path.stat().st_mtime:
@@ -1032,6 +1044,11 @@ def process_file(md_path, args):
     return
 
   info(f'  Content: {len(text):,} chars ({len(text) / 1000:.1f}K)')
+
+  if args.dump_text:
+    Path(args.dump_text).write_text(text_to_plain(text), encoding='utf-8')
+    info(f'  Wrote spoken text to {args.dump_text} (no audio synthesised)')
+    return
 
   # Render markers for the provider, then chunk
   if cfg['provider'] == 'google':
@@ -1247,6 +1264,8 @@ def main():
                       help='recurse into directory arguments')
   parser.add_argument('--preview', action='store_true',
                       help='show processed text and first chunk, no API call')
+  parser.add_argument('--dump-text', dest='dump_text', metavar='FILE',
+                      help='write the spoken text (preamble + body, markers removed) to FILE and exit; no API call')
   parser.add_argument('-F', '--force', action='store_true',
                       help='regenerate even if the output exists and is current')
   parser.add_argument('--stamp', action='store_true',
@@ -1298,6 +1317,8 @@ def main():
     die(22, '--output takes a single input file; use --outdir for batch runs')
   if args.preview and len(paths) > 1:
     die(22, '--preview takes a single input file (it would dump every file\'s text)')
+  if args.dump_text and len(paths) > 1:
+    die(22, '--dump-text takes a single input file')
 
   check_dependencies()
 
