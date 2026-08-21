@@ -84,6 +84,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 GOOGLE_TTS_URL = 'https://texttospeech.googleapis.com/v1/text:synthesize'
 GOOGLE_ADC_FILE = Path.home() / '.config/gcloud/application_default_credentials.json'
 GOOGLE_CHUNK_LIMIT = 3500  # bytes, under the 5000-byte SSML limit (break tags add overhead)
+# Chirp 3 HD is autoregressive and loses its place inside very long sentences,
+# skipping or repeating whole clauses (reproducibly: a 590-char sentence of
+# parallel "that ...;" clauses dropped 240 chars on every attempt, 2026-08-21).
+# Sentences longer than this get a micro-break at clause punctuation, which
+# stabilises the model and is prosodically what the punctuation asks for anyway.
+GOOGLE_SENTENCE_LIMIT = 240  # characters
 GOOGLE_VOICES = {
   ('en', 'male'):   'en-AU-Chirp3-HD-Charon',
   ('en', 'female'): 'en-AU-Chirp3-HD-Aoede',
@@ -519,6 +525,33 @@ def apply_lexicon_ssml(text, lexicon):
   return text
 
 
+def add_clause_breaks(text, limit=GOOGLE_SENTENCE_LIMIT):
+  """Insert [PAUSE_MICRO] at clause punctuation inside over-long sentences.
+
+  Chirp 3 HD drops or repeats clauses in long sentences (see
+  GOOGLE_SENTENCE_LIMIT). Breaking the sentence into shorter spoken runs at
+  its own semicolons, colons and commas fixes it without touching the text.
+  Applied on the SSML path only, so other providers are unaffected.
+  """
+  clause = re.compile(r'(?<=[;:,])\s+')
+
+  def fix(sentence):
+    if len(sentence) <= limit:
+      return sentence
+    out, run = [], ''
+    for piece in clause.split(sentence):
+      # Never stack a micro-break onto an existing marker
+      if run and len(run) + len(piece) + 1 > limit and not piece.startswith('[PAUSE'):
+        out.append(run.rstrip() + ' [PAUSE_MICRO]')
+        run = piece + ' '
+      else:
+        run += piece + ' '
+    out.append(run.rstrip())
+    return ' '.join(out)
+
+  return re.sub(r'[^.!?]+(?:[.!?]+|$)', lambda m: fix(m.group(0)), text)
+
+
 def text_to_ssml(text, lexicon):
   """Marker text -> SSML."""
   # NOTE: Chirp 3 HD honours <break> and <prosody> despite Google's docs listing
@@ -533,6 +566,7 @@ def text_to_ssml(text, lexicon):
   text = text.replace('[PAUSE_LONG]', '<break time="1200ms"/>')
   text = text.replace('[PAUSE_MEDIUM]', '<break time="800ms"/>')
   text = text.replace('[PAUSE_SHORT]', '<break time="400ms"/>')
+  text = text.replace('[PAUSE_MICRO]', '<break time="150ms"/>')
 
   text = text.replace('[QUOTE_START]', '<prosody rate="95%" pitch="-1st">')
   text = text.replace('[QUOTE_END]', '</prosody>')
@@ -557,8 +591,14 @@ def text_to_ssml(text, lexicon):
 
 # --- Marker rendering (non-SSML providers) ---
 
+def _strip_micro(text):
+  """[PAUSE_MICRO] is an SSML-path artefact; elsewhere it is just a space."""
+  return re.sub(r'\s*\[PAUSE_MICRO\]\s*', ' ', text)
+
+
 def text_to_punctuation(text):
   """Markers -> punctuation and newlines (OpenAI-style backends)."""
+  text = _strip_micro(text)
   text = text.replace('[PAUSE_XLONG]', '\n\n...\n\n')
   text = text.replace('[PAUSE_LONG]', '\n\n')
   text = text.replace('[PAUSE_MEDIUM]', '\n')
@@ -573,6 +613,7 @@ def text_to_plain(text):
 
   Used by --dump-text so downstream tools (forced alignment, captions) can
   align the exact words that were synthesised, preamble included."""
+  text = _strip_micro(text)
   text = re.sub(r'\[(?:PAUSE_(?:XLONG|LONG|MEDIUM|SHORT)|QUOTE_START|QUOTE_END)\]', '\n\n', text)
   text = re.sub(r'[ \t]+\n', '\n', text)
   text = re.sub(r'\n{3,}', '\n\n', text)
@@ -581,6 +622,7 @@ def text_to_plain(text):
 
 def text_to_tags(text):
   """Markers -> [pause] tags (Grok-style backends)."""
+  text = _strip_micro(text)
   text = text.replace('[PAUSE_XLONG]', '[long-pause] [long-pause]')
   text = text.replace('[PAUSE_LONG]', '[long-pause]')
   text = text.replace('[PAUSE_MEDIUM]', '[pause]')
@@ -1054,7 +1096,7 @@ def process_file(md_path, args):
   if cfg['provider'] == 'google':
     lexicon = load_lexicon(
       resolve_lexicon_path(md_path, meta['audio'], args.lexicon, cfg['language']))
-    chunks = chunk_ssml(text_to_ssml(text, lexicon))
+    chunks = chunk_ssml(text_to_ssml(add_clause_breaks(text), lexicon))
   else:
     rendered = text_to_tags(text) if cfg['markers'] == 'tags' else text_to_punctuation(text)
     chunks = chunk_text(rendered, cfg['chunk_limit'])
