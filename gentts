@@ -35,7 +35,7 @@ Frontmatter (all optional):
     lexicon: ./book_lexicon.json
     speaking_rate: 0.95
     preamble: true            # speak title/subtitle/author/date first
-    skip: false               # exclude this file from batch runs
+    skip: false               # skip unless -F (also --preview/--dump-text)
     timestamp: false          # give the MP3 the Markdown file's mtime
     markers: punctuation      # punctuation | tags (non-SSML providers)
     url: ...                  # 'compatible' provider only
@@ -852,7 +852,9 @@ def balance_prosody_tags(chunks):
 # --- HTTP ---
 
 def post_json(url, payload, headers, timeout=120, retries=5):
-  """POST JSON with exponential backoff on transient failures."""
+  """POST JSON; up to `retries` further attempts with exponential backoff.
+
+  Every loop iteration returns or raises, so the loop is the whole function."""
   delay = 2.0
   last = 'request failed'
 
@@ -876,8 +878,6 @@ def post_json(url, payload, headers, timeout=120, retries=5):
     info(f'    retry {attempt + 1}/{retries} in {delay:.0f}s ({last[:80]})')
     time.sleep(delay)
     delay = min(delay * 2, 30.0)
-
-  raise TTSError(last)
 
 
 # --- Provider: Google ---
@@ -1155,13 +1155,17 @@ def resolve_output(md_path, meta, args):
     return Path(args.output).expanduser()
   fm_out = meta['audio'].get('output')
   if fm_out:
-    p = Path(str(fm_out)).expanduser()
+    # Not expanduser(): a repository path, not a shell path.
+    p = Path(str(fm_out))
     # A bare filename names the file but not the directory, so --outdir still
     # supplies the directory. That lets a repository declare its published
     # audio filename without hardcoding anyone's deployment path.
     if args.outdir and p.parent == Path('.'):
       return Path(args.outdir).expanduser() / p.name
-    return (md_path.parent / p).expanduser()
+    out = md_path.parent / p
+    if p.is_absolute() or '..' in p.parts:
+      warn(f'{md_path}: audio.output leaves the Markdown tree: {out}')
+    return out
   if args.outdir:
     return Path(args.outdir).expanduser() / f'{md_path.stem}.mp3'
   return md_path.with_suffix('.mp3')
@@ -1437,7 +1441,8 @@ def main():
           strip_h1           drop a leading H1 the preamble already says
           provider           {' | '.join(PROVIDERS)}
                              (default: google)
-          voice              explicit voice name; overrides the voice table
+          voice              explicit voice name; an explicit voice, from
+                             either source, bypasses the gender/language table
           gender             male | female (default: male)
           lang_code          e.g. en-AU; defaults per language
           output             output MP3 path, relative to this file;
@@ -1445,7 +1450,8 @@ def main():
           lexicon            pronunciation JSON path, or false to disable
           speaking_rate      default {DEFAULT_SPEAKING_RATE}
           preamble           speak title/subtitle/author/date (default: true)
-          skip               exclude this file from batch runs
+          skip               skip this file unless -F is given (applies to
+                             single files, --preview and --dump-text too)
           timestamp          give the MP3 the Markdown file's mtime
           markers            punctuation | tags (non-SSML providers)
           url                endpoint URL
@@ -1478,7 +1484,7 @@ def main():
                       help='write the spoken text (preamble + body, markers removed) to FILE '
                            'and exit, no API call')
   parser.add_argument('-F', '--force', action='store_true',
-                      help='regenerate even if the output exists and is current')
+                      help='regenerate even if the output is current; overrides audio.skip')
   parser.add_argument('--stamp', action='store_true',
                       help='write audio.file/duration back into the frontmatter')
   parser.add_argument('-T', '--timestamp', action='store_true',

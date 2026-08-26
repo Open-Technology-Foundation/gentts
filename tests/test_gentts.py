@@ -417,6 +417,16 @@ class NestedEmphasis(unittest.TestCase):
                      'bold ital bold and plain')
 
 
+class FrontmatterOutputPath(unittest.TestCase):
+  """2.31: frontmatter audio.output is a repository path, not a shell path."""
+
+  def test_tilde_in_frontmatter_output_is_literal(self):
+    meta = {'audio': {'output': '~/x.mp3'}}
+    args = argparse.Namespace(output=None, outdir=None)
+    out = G['resolve_output'](Path('/repo/a.md'), meta, args)
+    self.assertEqual(out, Path('/repo/~/x.mp3'))
+
+
 if __name__ == '__main__':
   unittest.main()
 

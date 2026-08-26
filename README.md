@@ -55,7 +55,7 @@ audio:
   lexicon: ./book_lexicon.json  # or false to disable substitution
   speaking_rate: 0.95
   preamble: true                # speak title/subtitle/author/date first
-  skip: false                   # exclude from batch runs (-F overrides)
+  skip: false                   # skip unless -F; applies to --preview/--dump-text too
   timestamp: false              # give the MP3 this file's mtime
   markers: punctuation          # punctuation | tags (non-SSML providers)
   url: ...                      # 'compatible' provider only, https required
@@ -65,7 +65,9 @@ audio:
 ---
 ```
 
-Precedence is **CLI flag > `audio:` frontmatter > built-in default**.
+Precedence is **CLI flag > `audio:` frontmatter > built-in default**, per setting: an explicit
+`voice` from either source bypasses the gender/language table, so `-g female` does not override a
+frontmatter `voice`.
 
 `title`, `subtitle`, `author` and `date` are spoken as a preamble before the body; set
 `preamble: false` to suppress it. `date` accepts `YYYY-MM-DD`, `YYYY-MM`, `YYYY` or a YAML date,
@@ -108,7 +110,8 @@ formatting in that block are not preserved.
 Resolved in this order:
 
 1. `-o FILE` — single input only
-2. `audio.output` in frontmatter — relative to the Markdown file
+2. `audio.output` in frontmatter — relative to the Markdown file (no `~` expansion; a path that
+   leaves the tree via `..` or `/` is honoured with a warning)
 3. `-O DIR` — batch output directory, file named after the Markdown stem
 4. sibling `<stem>.mp3`
 
@@ -220,7 +223,8 @@ blockquote prosody and lexicon pronunciation. Default voices:
 
 Any other language needs an explicit `voice` and `lang_code`.
 
-Requests retry with exponential backoff (2s doubling to 30s, five attempts) on 429/500/502/503/504
+Requests retry with exponential backoff (2s doubling to 30s, five retries, six requests in total)
+on 429/500/502/503/504
 — Chirp3-HD returns quota errors under sustained load, and a book-length run is dozens of
 sequential calls.
 
