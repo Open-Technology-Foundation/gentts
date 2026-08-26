@@ -286,6 +286,96 @@ class ReferenceLinks(unittest.TestCase):
     self.assertEqual(G['preprocess_content'](src), 'See text and ref.')
 
 
+class FrontmatterValueErrors(unittest.TestCase):
+  """2.21-2.24: bad frontmatter values exit with the documented codes, not tracebacks."""
+
+  def test_non_numeric_speaking_rate_exits_22(self):
+    with self.assertRaises(SystemExit) as cm:
+      G['resolve_settings'](Path('x.md'), {'audio': {'speaking_rate': 'fast'}}, cli())
+    self.assertEqual(cm.exception.code, 22)
+
+  def test_non_numeric_chunk_limit_exits_22(self):
+    meta = {'audio': {'provider': 'openai', 'chunk_limit': '4k'}}
+    with self.assertRaises(SystemExit) as cm:
+      G['resolve_settings'](Path('x.md'), meta, cli())
+    self.assertEqual(cm.exception.code, 22)
+
+  def test_empty_voice_falls_back_to_table(self):
+    cfg = G['resolve_settings'](Path('x.md'), {'audio': {'voice': ''}}, cli())
+    self.assertEqual(cfg['voice'], 'en-AU-Chirp3-HD-Charon')
+
+  def test_date_false_and_blank_are_silent(self):
+    self.assertEqual(G['format_date'](False), '')
+    self.assertEqual(G['format_date']('  '), '')
+    self.assertEqual(G['format_date']('2026-08'), 'August 2026')
+
+  def test_non_object_lexicon_exits_4(self):
+    with tempfile.TemporaryDirectory() as d:
+      lex = Path(d) / 'lex.json'
+      lex.write_text('["x"]')
+      with self.assertRaises(SystemExit) as cm:
+        G['load_lexicon'](lex)
+      self.assertEqual(cm.exception.code, 4)
+
+
+class FilesystemErrors(unittest.TestCase):
+  """2.25: unreadable input is a documented exit, not a traceback."""
+
+  def test_undecodable_input_exits_4(self):
+    with tempfile.TemporaryDirectory() as d:
+      md = Path(d) / 'b.md'
+      md.write_bytes(b'\xff\xfe bad\n')
+      with self.assertRaises(SystemExit) as cm:
+        G['read_markdown'](md)
+      self.assertEqual(cm.exception.code, 4)
+
+  def test_unreadable_input_exits_3(self):
+    if os.geteuid() == 0:
+      self.skipTest('root ignores file modes')
+    with tempfile.TemporaryDirectory() as d:
+      md = Path(d) / 'c.md'
+      md.write_text('x')
+      md.chmod(0)
+      try:
+        with self.assertRaises(SystemExit) as cm:
+          G['read_markdown'](md)
+        self.assertEqual(cm.exception.code, 3)
+      finally:
+        md.chmod(0o600)
+
+
+class HttpRetry(unittest.TestCase):
+  """2.26: a body truncated mid-read is retried like any other transient failure."""
+
+  def test_incomplete_read_is_retried(self):
+    import http.client
+    import urllib.request
+    calls = []
+
+    class Resp:
+      def __enter__(self):
+        return self
+
+      def __exit__(self, *a):
+        return False
+
+      def read(self):
+        calls.append(1)
+        if len(calls) == 1:
+          raise http.client.IncompleteRead(b'part')
+        return b'ok'
+
+    real_open, real_sleep = urllib.request.urlopen, G['time'].sleep
+    urllib.request.urlopen = lambda *a, **k: Resp()
+    G['time'].sleep = lambda s: None
+    try:
+      out = G['post_json']('https://x/', b'{}', {}, retries=2)
+    finally:
+      urllib.request.urlopen, G['time'].sleep = real_open, real_sleep
+    self.assertEqual(out, b'ok')
+    self.assertEqual(len(calls), 2)
+
+
 if __name__ == '__main__':
   unittest.main()
 

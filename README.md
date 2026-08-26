@@ -360,12 +360,13 @@ GPL-3.0 — see [LICENSE](LICENSE).
 
 | Code | Meaning |
 |------|---------|
-| 1 | provider or ffmpeg failure |
-| 3 | file not found (input, lexicon, credentials) |
-| 4 | malformed frontmatter or lexicon |
+| 1 | provider, ffmpeg or filesystem failure |
+| 2 | invalid command line (argparse) |
+| 3 | file not found or unreadable (input, lexicon, credentials) |
+| 4 | malformed frontmatter, lexicon, or input that is not UTF-8 |
 | 18 | missing required command |
 | 19 | missing API key or GCP quota project |
-| 22 | invalid option, incomplete provider configuration, or output collision |
+| 22 | bad frontmatter value, incomplete provider configuration, or output collision |
 | 130 | interrupted |
 
 #fin

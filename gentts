@@ -57,6 +57,7 @@ import argparse
 import base64
 import datetime
 import html
+import http.client
 import json
 import os
 import re
@@ -171,7 +172,12 @@ FRONTMATTER_RE = re.compile(r'\A---[ \t]*\r?\n(.*?)^(?:---|\.\.\.)[ \t]*\r?$\r?\
 
 def read_markdown(path):
   """Return (meta, body). meta['audio'] is always a dict."""
-  raw = path.read_text(encoding='utf-8')
+  try:
+    raw = path.read_text(encoding='utf-8')
+  except UnicodeDecodeError as e:
+    die(4, f'{path}: not UTF-8 text: {e}')
+  except OSError as e:
+    die(3, f'{path}: {e.strerror}')
   meta, body = {}, raw
 
   m = FRONTMATTER_RE.match(raw)
@@ -500,7 +506,9 @@ def load_lexicon(path):
     data = json.loads(path.read_text(encoding='utf-8'))
   except (OSError, json.JSONDecodeError) as e:
     die(4, f'{path}: unreadable lexicon: {e}')
-  return {k: v for k, v in data.items() if not k.startswith('_')}
+  if not isinstance(data, dict):
+    die(4, f'{path}: lexicon must be a JSON object mapping term -> pronunciation')
+  return {k: v for k, v in data.items() if not str(k).startswith('_')}
 
 
 def resolve_lexicon_path(md_path, audio_meta, cli_lexicon, language):
@@ -838,7 +846,9 @@ def post_json(url, payload, headers, timeout=120, retries=5):
       last = f'HTTP {e.code}: {body[:300]}'
       if e.code not in RETRY_HTTP_CODES or attempt == retries:
         raise TTSError(last) from None
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+    # URLError is an OSError; IncompleteRead (body cut mid-read) is an
+    # HTTPException and would otherwise escape the retry loop.
+    except (OSError, http.client.HTTPException) as e:
       last = f'network error: {e}'
       if attempt == retries:
         raise TTSError(last) from None
@@ -1022,11 +1032,13 @@ def format_duration(seconds):
 
 def format_date(val):
   """Frontmatter date -> spoken form ('August 2026')."""
-  if val is None:
+  if val is None or val is False:
     return ''
   if isinstance(val, (datetime.date, datetime.datetime)):
     return val.strftime('%B %Y')
   s = str(val).strip()
+  if not s:
+    return ''
   for fmt, out in (('%Y-%m-%d', '%B %Y'), ('%Y-%m', '%B %Y'), ('%Y', '%Y')):
     try:
       return datetime.datetime.strptime(s, fmt).strftime(out)
@@ -1044,6 +1056,14 @@ def pick(cli_value, fm_value, default=None):
   return default
 
 
+def number(md_path, key, val, cast):
+  """cast(val) or die(22) naming the frontmatter key; CLI values are argparse-typed."""
+  try:
+    return cast(val)
+  except (TypeError, ValueError):
+    die(22, f'{md_path}: audio.{key} must be a number, got {val!r}')
+
+
 def resolve_settings(md_path, meta, args):
   """Merge CLI flags, frontmatter and defaults into one provider config."""
   audio = meta['audio']
@@ -1055,14 +1075,15 @@ def resolve_settings(md_path, meta, args):
   cfg = {
     'provider': provider,
     'language': language,
-    'speaking_rate': float(pick(args.speaking_rate, audio.get('speaking_rate'),
-                                DEFAULT_SPEAKING_RATE)),
+    'speaking_rate': number(md_path, 'speaking_rate',
+                            pick(args.speaking_rate, audio.get('speaking_rate'),
+                                 DEFAULT_SPEAKING_RATE), float),
     'preamble': bool(pick(None, audio.get('preamble'), True)),
   }
 
   if provider == 'google':
     gender = str(pick(args.gender, audio.get('gender'), 'male')).lower()
-    voice = pick(args.voice, audio.get('voice'))
+    voice = pick(args.voice, audio.get('voice')) or None  # "" means unset
     if voice is None:
       if (language, gender) not in GOOGLE_VOICES:
         die(22, f'{md_path}: no default voice for language={language!r} gender={gender!r}; '
@@ -1092,7 +1113,9 @@ def resolve_settings(md_path, meta, args):
       model=pick(args.model, audio.get('model'), preset['model']),
       voice=pick(args.voice, audio.get('voice'), preset['voice']),
       key_env=pick(args.key_env, audio.get('key_env'), preset['key_env']),
-      chunk_limit=int(pick(args.chunk_limit, audio.get('chunk_limit'), preset['chunk_limit'])),
+      chunk_limit=number(md_path, 'chunk_limit',
+                         pick(args.chunk_limit, audio.get('chunk_limit'), preset['chunk_limit']),
+                         int),
       markers=str(pick(args.markers, audio.get('markers'), preset['markers'])).lower(),
       send_speed=preset['send_speed'],
     )
@@ -1187,7 +1210,10 @@ def process_file(md_path, args):
   info(f'  Content: {len(text):,} chars ({len(text) / 1000:.1f}K)')
 
   if args.dump_text:
-    Path(args.dump_text).write_text(text_to_plain(text), encoding='utf-8')
+    try:
+      Path(args.dump_text).write_text(text_to_plain(text), encoding='utf-8')
+    except OSError as e:
+      die(1, f'cannot write {args.dump_text}: {e.strerror}')
     info(f'  Wrote spoken text to {args.dump_text} (no audio synthesised)')
     return
 
@@ -1503,5 +1529,7 @@ if __name__ == '__main__':
     main()
   except KeyboardInterrupt:
     sys.exit(130)
+  except OSError as e:
+    die(1, f'{e.filename or ""}: {e.strerror}'.lstrip(': '))
 
 #fin
