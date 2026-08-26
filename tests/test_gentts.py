@@ -427,6 +427,27 @@ class FrontmatterOutputPath(unittest.TestCase):
     self.assertEqual(out, Path('/repo/~/x.mp3'))
 
 
+class GcloudTimeout(unittest.TestCase):
+  """A hung gcloud (e.g. blackholed IPv6) must fail loudly, not block forever."""
+
+  def test_hung_gcloud_exits_with_message(self):
+    with tempfile.TemporaryDirectory() as d:
+      fake = Path(d) / 'gcloud'
+      fake.write_text('#!/bin/sh\nsleep 30\n')
+      fake.chmod(0o755)
+      adc = Path(d) / 'adc.json'
+      adc.write_text('{"quota_project_id": "p"}')
+      old_path, old_adc = os.environ['PATH'], G['GOOGLE_ADC_FILE']
+      os.environ['PATH'] = f'{d}:{old_path}'
+      G['GOOGLE_ADC_FILE'] = adc
+      try:
+        with self.assertRaises(SystemExit) as cm:
+          G['google_credentials'](timeout=1)
+      finally:
+        os.environ['PATH'], G['GOOGLE_ADC_FILE'] = old_path, old_adc
+      self.assertEqual(cm.exception.code, 1)
+
+
 if __name__ == '__main__':
   unittest.main()
 
