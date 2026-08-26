@@ -448,6 +448,30 @@ class GcloudTimeout(unittest.TestCase):
       self.assertEqual(cm.exception.code, 1)
 
 
+class ConcatenateToPartFile(unittest.TestCase):
+  """The .part staging name must not confuse ffmpeg's format detection."""
+
+  def test_concat_writes_playable_mp3_to_part_path(self):
+    import shutil
+    import subprocess
+    if not shutil.which('ffmpeg'):
+      self.skipTest('ffmpeg not installed')
+    with tempfile.TemporaryDirectory() as d:
+      parts = []
+      for i in range(2):
+        f = os.path.join(d, f'c{i}.mp3')
+        subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=24000:cl=mono',
+                        '-t', '0.3', '-c:a', 'libmp3lame', '-q:a', '4', f],
+                       capture_output=True, check=True)
+        parts.append(f)
+      out = Path(d) / 'final.mp3'
+      part = out.with_name(out.name + '.part')
+      G['concatenate_audio'](parts, part, d)
+      G['finalize_output'](part, out)
+      self.assertTrue(out.exists())
+      self.assertGreater(G['get_audio_duration'](out), 1.0)  # 0.3 + 0.5 + 0.3
+
+
 if __name__ == '__main__':
   unittest.main()
 

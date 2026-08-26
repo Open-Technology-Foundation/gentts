@@ -1005,9 +1005,11 @@ def concatenate_audio(chunk_files, output_path, tmpdir):
       if i < len(chunk_files) - 1:
         f.write(f"file '{silence_path}'\n")
 
+  # -f mp3: the output is staged as "<name>.mp3.part", and ffmpeg would
+  # otherwise infer the container from that unknown extension and fail.
   subprocess.run([
     'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
-    '-i', list_path, '-c', 'copy', str(output_path),
+    '-i', list_path, '-c', 'copy', '-f', 'mp3', str(output_path),
   ], capture_output=True, check=True)
 
 
@@ -1294,7 +1296,8 @@ def process_file(md_path, args):
   except TTSError as e:
     die(1, f'{md_path}: {e}')
   except subprocess.CalledProcessError as e:
-    die(1, f'{md_path}: ffmpeg failed: {e.stderr.decode("utf-8", "replace")[:300]}')
+    # The last lines carry the error; the first are the version banner.
+    die(1, f'{md_path}: ffmpeg failed: {e.stderr.decode("utf-8", "replace").strip()[-300:]}')
   finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
     part_path.unlink(missing_ok=True)
