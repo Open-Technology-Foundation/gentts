@@ -142,7 +142,8 @@ speech.
 | Markdown pipe tables (2+ consecutive `\|` lines) | Blockquotes → prosody span |
 | HTML `table`, `pre`, `style`, `script`, `audio`, `video`, `figure`, `iframe` | Bullet and ordered-list markers |
 | `<image>`, `<vidframe>`, `<IKLAN>`, music-player sections | Bold, italic, links, wiki-links |
-| Footnote references (`[^1]`, `[12]`) and definitions | `figcaption` text |
+| Footnote references (`[^1]`, `[12]`) and definitions, including indented continuation paragraphs | `figcaption` text |
+| Reference-link definitions (`[label]: url`) | Reference links (`[text][label]`) |
 | HTML comments, stage directions (`[Cut to...]`) | Horizontal rules → long pause |
 | `↩` footnote-return marks, `√` root sign | |
 
@@ -286,7 +287,8 @@ truncated one. Non-Google responses that are not MP3 (a proxy's JSON error with 
 the run rather than being written.
 
 Google chunks on **bytes** of SSML (3500, under the 5000 limit — break tags are most of the
-overhead), splitting at `<break>` tags, then sentences. `<prosody>` spans crossing a chunk
+overhead), splitting at `<break>` tags, then on whitespace for a run with no breaks at all; a
+chunk containing only break tags is never sent. `<prosody>` spans crossing a chunk
 boundary are closed and reopened so no chunk ships unbalanced markup.
 
 The other providers chunk on characters, at paragraph boundaries, then sentences, then hard-wrap —

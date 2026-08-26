@@ -289,19 +289,43 @@ def strip_footnote_defs(text):
   """Drop footnote definitions ([^1]: ...) and their indented continuations."""
   lines = text.split('\n')
   out = []
-  dropping = False
-  for line in lines:
-    if re.match(r'^\[\^[^\]]+\]:', line):
-      dropping = True
+  i = 0
+  while i < len(lines):
+    if not re.match(r'^\[\^[^\]]+\]:', lines[i]):
+      out.append(lines[i])
+      i += 1
       continue
-    if dropping and (not line.strip() or re.match(r'^[ \t]{2,}\S', line)):
-      if not line.strip():
-        dropping = False
-        out.append(line)
-      continue
-    dropping = False
-    out.append(line)
+    # Drop the definition, any lazy (unindented) lines directly under it,
+    # and indented paragraphs after blank lines. Stop at the first blank
+    # line whose next non-blank line is not indented.
+    i += 1
+    while i < len(lines):
+      if lines[i].strip():
+        i += 1
+        continue
+      j = i
+      while j < len(lines) and not lines[j].strip():
+        j += 1
+      if j < len(lines) and re.match(r'^[ \t]{2,}\S', lines[j]):
+        i = j
+        continue
+      break
   return '\n'.join(out)
+
+
+def strip_reference_links(text):
+  """Drop [label]: url definitions; [text][label] and [label] speak the text.
+
+  Only labels that are actually defined are treated as links, so a
+  bracketed aside such as "[Law 22/1999]" stays prose."""
+  definition = re.compile(r'^[ \t]{0,3}\[([^\]]+)\]:[ \t]*\S.*$', re.MULTILINE)
+  labels = {m.group(1).lower() for m in definition.finditer(text)}
+  if not labels:
+    return text
+  text = definition.sub('', text)
+  text = re.sub(r'\[([^\]]+)\]\[([^\]]*)\]', r'\1', text)
+  return re.sub(r'\[([^\]]+)\]',
+                lambda m: m.group(1) if m.group(1).lower() in labels else m.group(0), text)
 
 
 def strip_wikilinks(text):
@@ -453,6 +477,7 @@ def preprocess_content(content):
 
   # Stage 3: strip formatting
   text = strip_footnote_defs(text)
+  text = strip_reference_links(text)
   text = strip_wikilinks(text)
   text = strip_markdown(text)
   text = strip_html_tags(text)
@@ -525,19 +550,27 @@ def apply_lexicon_ssml(text, lexicon):
   (e.g. the Sanskrit root dhr -> "dree"): that classifier overrides <phoneme>
   but not a <sub> respelling. Verified on en-AU-Chirp3-HD-Charon, 2026-06-21.
   """
-  for term, val in sorted(lexicon.items(), key=lambda x: -len(x[0])):
-    pattern = re.compile(r'\b(' + re.escape(term) + r')\b', re.IGNORECASE)
+  if not lexicon:
+    return text
+  # One alternation, longest term first, in a single pass: a per-term loop
+  # would rescan tags it had just emitted and nest <phoneme> inside a ph=""
+  # attribute when one term contains another ("Pak Harto" / "Harto").
+  terms = sorted(lexicon, key=len, reverse=True)
+  pattern = re.compile(r'\b(' + '|'.join(re.escape(t) for t in terms) + r')\b', re.IGNORECASE)
+  lookup = {t.lower(): v for t, v in lexicon.items()}
+
+  def render(m):
+    word = m.group(1)
+    val = lookup[word.lower()]
     if isinstance(val, dict):
       alias = escape_ssml(str(val.get('say', '')))
       # Leading micro-break: Chirp otherwise glues the substituted alias onto
       # the preceding word ("root dhṛ" -> "rootdree"). 50ms restores the word
       # boundary without an audible pause. Verified by ear, 2026-06-21.
-      text = pattern.sub(
-        lambda m, a=alias: f'<break time="50ms"/><sub alias="{a}">{m.group(1)}</sub>', text)
-    else:
-      text = pattern.sub(
-        lambda m, ph=val: f'<phoneme alphabet="ipa" ph="{ph}">{m.group(1)}</phoneme>', text)
-  return text
+      return f'<break time="50ms"/><sub alias="{alias}">{word}</sub>'
+    return f'<phoneme alphabet="ipa" ph="{escape_ssml(str(val))}">{word}</phoneme>'
+
+  return pattern.sub(render, text)
 
 
 def add_clause_breaks(text, limit=GOOGLE_SENTENCE_LIMIT):
@@ -729,29 +762,33 @@ def chunk_ssml(ssml_text):
   chunks = []
   current = ''
 
+  def flush():
+    # A chunk of nothing but break tags would bill a request for silence;
+    # the 0.5s concat gap covers that boundary anyway.
+    if re.sub(r'<break[^>]*/>', '', current).strip():
+      chunks.append(f'<speak>{current.strip()}</speak>')
+
   for seg in segments:
-    test = current + seg
-    if ssml_bytes(test) > GOOGLE_CHUNK_LIMIT:
-      if not current.strip() or ssml_bytes(seg) > GOOGLE_CHUNK_LIMIT:
-        if current.strip():
-          chunks.append(f'<speak>{current.strip()}</speak>')
-          current = ''
-        for sent in re.split(r'(?<=[.!?])\s+', seg):
-          if current and ssml_bytes(current + ' ' + sent) > GOOGLE_CHUNK_LIMIT:
-            if current.strip():
-              chunks.append(f'<speak>{current.strip()}</speak>')
-            current = sent
-          else:
-            current = f'{current} {sent}' if current else sent
+    if ssml_bytes(current + seg) <= GOOGLE_CHUNK_LIMIT:
+      current += seg
+      continue
+    flush()
+    current = ''
+    if ssml_bytes(seg) <= GOOGLE_CHUNK_LIMIT:
+      current = seg
+      continue
+    # A single segment over the limit has no break tag to split on, and no
+    # sentence end either (text_to_ssml turned those into break tags), so
+    # wrap it on whitespace: a request over 5000 bytes is rejected outright.
+    for word in seg.split():
+      candidate = f'{current} {word}' if current else word
+      if ssml_bytes(candidate) > GOOGLE_CHUNK_LIMIT:
+        flush()
+        current = word
       else:
-        chunks.append(f'<speak>{current.strip()}</speak>')
-        current = seg
-    else:
-      current = test
+        current = candidate
 
-  if current.strip():
-    chunks.append(f'<speak>{current.strip()}</speak>')
-
+  flush()
   return balance_prosody_tags(chunks)
 
 

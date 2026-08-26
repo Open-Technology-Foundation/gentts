@@ -236,6 +236,56 @@ class OutputValidation(unittest.TestCase):
       self.assertEqual(good.read_bytes(), b'GOOD')
 
 
+class LexiconSubstitution(unittest.TestCase):
+  """2.10: emitted tags are never rescanned for shorter terms."""
+
+  def test_nested_terms_produce_well_formed_xml(self):
+    from xml.dom import minidom
+    out = G['apply_lexicon_ssml']('Pak Harto spoke.', {'Pak Harto': 'pak harto', 'Harto': 'harto'})
+    minidom.parseString(f'<speak>{out}</speak>')
+    self.assertEqual(out.count('<phoneme'), 1)
+
+  def test_term_matching_attribute_text_does_not_corrupt_it(self):
+    from xml.dom import minidom
+    out = G['apply_lexicon_ssml']('karma and ipa.', {'karma': 'kɑːmə', 'ipa': 'aɪpiːeɪ'})
+    minidom.parseString(f'<speak>{out}</speak>')
+    self.assertIn('alphabet="ipa"', out)
+
+
+class SsmlChunkLimits(unittest.TestCase):
+  """2.12: no chunk over the byte limit, no silence-only chunk."""
+
+  def test_punctuation_free_run_is_hard_wrapped(self):
+    text = G['add_clause_breaks']('Intro.\n\n' + ('word ' * 1000).strip() + '\n\nOutro.')
+    chunks = G['chunk_ssml'](G['text_to_ssml'](text, {}))
+    for c in chunks:
+      self.assertLessEqual(len(c.encode('utf-8')), G['GOOGLE_CHUNK_LIMIT'])
+    self.assertEqual(''.join(chunks).count('word'), 1000)
+
+  def test_no_break_only_chunk(self):
+    chunks = G['chunk_ssml'](G['text_to_ssml']('word ' * 900, {}))
+    import re
+    for c in chunks:
+      self.assertTrue(re.sub(r'<[^>]+>', '', c).strip(), c)
+
+
+class FootnoteDefinitions(unittest.TestCase):
+  """2.14: whole multi-paragraph footnote bodies are dropped."""
+
+  def test_indented_continuation_paragraphs_dropped(self):
+    src = ('Text[^1].\n\n[^1]: First para.\n    indented cont.\n\n    para after blank.\n\n'
+           '[^note]: named.\nlazy continuation\n\nNormal.')
+    self.assertEqual(G['preprocess_content'](src), 'Text.\n\nNormal.')
+
+
+class ReferenceLinks(unittest.TestCase):
+  """2.15: [text][ref] speaks the text; [ref]: url lines are dropped."""
+
+  def test_reference_links_and_definitions(self):
+    src = 'See [text][1] and [ref].\n\n[1]: http://example.com\n[ref]: http://y "Title"'
+    self.assertEqual(G['preprocess_content'](src), 'See text and ref.')
+
+
 if __name__ == '__main__':
   unittest.main()
 
