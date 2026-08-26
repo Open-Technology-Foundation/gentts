@@ -58,7 +58,7 @@ audio:
   skip: false                   # exclude from batch runs (-F overrides)
   timestamp: false              # give the MP3 this file's mtime
   markers: punctuation          # punctuation | tags (non-SSML providers)
-  url: ...                      # 'compatible' provider only
+  url: ...                      # 'compatible' provider only, https required
   model: ...
   key_env: ...
   chunk_limit: ...
@@ -86,6 +86,8 @@ audio:
   duration: 10
   duration_hms: '0:10'
 ```
+
+`--stamp` preserves the Markdown file's mtime, so stamping alone never makes a file look stale.
 
 `-T`/`--timestamp` (or `audio.timestamp: true`) gives the MP3 the Markdown file's mtime, so a later
 `ls -lt` or `find -newer` shows at a glance which MP3s are in sync with their source: equal mtimes
@@ -220,6 +222,11 @@ sequential calls.
 One OpenAI-shaped `/audio/speech` backend with three presets. `compatible` takes its values from
 frontmatter or flags, so any service using the same request shape works.
 
+Frontmatter is trusted with `url` and `key_env` **only for `compatible`, and only over `https`**
+— a Markdown file in a shared repository must not be able to send an environment secret to a
+host of its choosing under the `openai`/`grok` presets. `--url` on the command line accepts any
+scheme (for a local server). Every non-Google run prints the resolved endpoint and key name.
+
 | Provider | Endpoint | Model | Voice | Key | Chunk limit | Markers | Sends `speed` |
 |----------|----------|-------|-------|-----|-------------|---------|---------------|
 | `openai` | `api.openai.com` | `tts-1-hd` | `onyx` | `OPENAI_API_KEY` | 4000 | punctuation | yes |
@@ -321,6 +328,14 @@ a single sentence longer than the limit would otherwise be rejected outright.
 | `gcloud` | ADC access token, Google provider only |
 
 No virtualenv. Stdlib plus PyYAML, HTTP over `urllib`.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Stdlib `unittest`, no network, no provider calls.
 
 ## Install on PATH
 

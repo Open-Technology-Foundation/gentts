@@ -195,9 +195,15 @@ def read_markdown(path):
 
 
 def write_frontmatter(path, meta, body):
-  """Rewrite path with meta as frontmatter, body unchanged."""
+  """Rewrite path with meta as frontmatter, body unchanged, mtime preserved.
+
+  --stamp records metadata, not new content, so the file must not become
+  "newer" than the audio just generated from it: that would mark it stale
+  and re-bill it on the next run."""
   dumped = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True, default_flow_style=False)
+  st = path.stat()
   path.write_text(f'---\n{dumped}---\n\n{body.lstrip(chr(10))}', encoding='utf-8')
+  os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
 
 
 # --- Content preprocessing ---
@@ -346,7 +352,9 @@ def strip_html_tags(text):
   text = re.sub(r'<figcaption[^>]*>(.*?)</figcaption>', r'\1', text,
                 flags=re.DOTALL | re.IGNORECASE)
   text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
-  text = re.sub(r'<[^>]+>', '', text)
+  # Tag-shaped only: a literal "<" in prose ("a < b") is not markup, and
+  # the pattern must not span lines or it eats whole paragraphs.
+  text = re.sub(r'</?[A-Za-z!][^<>\n]*>', '', text)
   return text
 
 
@@ -536,7 +544,9 @@ def add_clause_breaks(text, limit=GOOGLE_SENTENCE_LIMIT):
   its own semicolons, colons and commas fixes it without touching the text.
   Applied on the SSML path only, so other providers are unaffected.
   """
-  clause = re.compile(r'(?<=[;:,])\s+')
+  # Horizontal whitespace only: \s would swallow the newlines that
+  # text_to_ssml() later turns into paragraph and line breaks.
+  clause = re.compile(r'(?<=[;:,])[ \t]+')
 
   def fix(sentence):
     if len(sentence) <= limit:
@@ -552,7 +562,9 @@ def add_clause_breaks(text, limit=GOOGLE_SENTENCE_LIMIT):
     out.append(run.rstrip())
     return ' '.join(out)
 
-  return re.sub(r'[^.!?]+(?:[.!?]+|$)', lambda m: fix(m.group(0)), text)
+  # Per line, for the same reason: a sentence never spans a line break here.
+  return '\n'.join(re.sub(r'[^.!?]+(?:[.!?]+|$)', lambda m: fix(m.group(0)), line)
+                   for line in text.split('\n'))
 
 
 def text_to_ssml(text, lexicon):
@@ -990,6 +1002,18 @@ def resolve_settings(md_path, meta, args):
     cfg.update(voice=voice, gender=gender, lang_code=lang_code, chunk_limit=GOOGLE_CHUNK_LIMIT)
   else:
     preset = OPENAI_COMPATIBLE[provider]
+    # Endpoint and key name are trusted from frontmatter only for the
+    # 'compatible' provider, and then only over https. A Markdown file in a
+    # shared repository must not be able to redirect an environment secret
+    # to a host of its choosing under the openai/grok presets.
+    if provider != 'compatible':
+      for key in ('url', 'key_env'):
+        if audio.get(key):
+          die(22, f'{md_path}: audio.{key} is only honoured for provider "compatible"; '
+                  f'use --{key.replace("_", "-")} on the command line')
+    fm_url = audio.get('url')
+    if fm_url and args.url is None and not str(fm_url).startswith('https://'):
+      die(22, f'{md_path}: audio.url must use https://; pass --url to allow another scheme')
     cfg.update(
       url=pick(args.url, audio.get('url'), preset['url']),
       model=pick(args.model, audio.get('model'), preset['model']),
@@ -1117,6 +1141,8 @@ def process_file(md_path, args):
     return
 
   info(f'  Provider: {cfg["provider"]}  Voice: {cfg["voice"]}  Chunks: {len(chunks)}')
+  if cfg['provider'] != 'google':
+    info(f'  Endpoint: {cfg["url"]}  Key: ${cfg["key_env"]}')
   output_path.parent.mkdir(parents=True, exist_ok=True)
 
   tmpdir = tempfile.mkdtemp(prefix='gentts_')
