@@ -24,6 +24,9 @@ Frontmatter (all optional):
   date: 2026-08-01
   language: en
   audio:
+    title: "0: Preface"       # spoken title/subtitle/author/date, if
+    subtitle: ...             #   they differ from the document's
+    strip_h1: true            # drop a leading H1 the preamble already says
     provider: google          # google | openai | grok | compatible
     voice: en-AU-Chirp3-HD-Charon
     gender: male              # male | female (picks voice from the table)
@@ -453,7 +456,7 @@ def preprocess_content(content):
 # --- Lexicon ---
 
 def load_lexicon(path):
-  """Load a pronunciation lexicon, dropping _comment keys."""
+  """Load a pronunciation lexicon, dropping keys that start with "_" (comments)."""
   if path is None or not path.exists():
     return {}
   try:
@@ -492,7 +495,7 @@ def resolve_lexicon_path(md_path, audio_meta, cli_lexicon, language):
 # --- SSML generation (Google) ---
 
 def escape_ssml(text):
-  """Escape special XML characters. [PAUSE_*] markers survive untouched."""
+  """Escape special XML characters. [PAUSE_*] / [QUOTE_*] markers survive untouched."""
   text = text.replace('&', '&amp;')
   text = text.replace('<', '&lt;')
   text = text.replace('>', '&gt;')
@@ -1239,6 +1242,8 @@ def collect_inputs(items, recursive):
 
 
 def check_dependencies():
+  """Exit 18 unless ffmpeg and ffprobe are on PATH. gcloud is checked by the google
+  provider only, when credentials are first needed."""
   for cmd in ('ffmpeg', 'ffprobe'):
     if not shutil.which(cmd):
       die(18, f'required command not found: {cmd} (apt install ffmpeg)')
@@ -1307,7 +1312,8 @@ def main():
   parser.add_argument('--preview', action='store_true',
                       help='show processed text and first chunk, no API call')
   parser.add_argument('--dump-text', dest='dump_text', metavar='FILE',
-                      help='write the spoken text (preamble + body, markers removed) to FILE and exit; no API call')
+                      help='write the spoken text (preamble + body, markers removed) to FILE '
+                           'and exit, no API call')
   parser.add_argument('-F', '--force', action='store_true',
                       help='regenerate even if the output exists and is current')
   parser.add_argument('--stamp', action='store_true',
