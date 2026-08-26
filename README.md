@@ -49,13 +49,13 @@ audio:
   strip_h1: true                # drop a leading H1 the preamble already says
   provider: google              # google | openai | grok | compatible
   voice: en-AU-Chirp3-HD-Charon # overrides the gender/language voice table
-  gender: male                  # male | female
+  gender: male                  # male | female (default: male)
   lang_code: en-AU
   output: ../html/audio/dharma.mp3
   lexicon: ./book_lexicon.json  # or false to disable substitution
   speaking_rate: 0.95
   preamble: true                # speak title/subtitle/author/date first
-  skip: false                   # exclude from batch runs
+  skip: false                   # exclude from batch runs (-F overrides)
   timestamp: false              # give the MP3 this file's mtime
   markers: punctuation          # punctuation | tags (non-SSML providers)
   url: ...                      # 'compatible' provider only
@@ -139,6 +139,7 @@ speech.
 | `<image>`, `<vidframe>`, `<IKLAN>`, music-player sections | Bold, italic, links, wiki-links |
 | Footnote references and definitions | `figcaption` text |
 | HTML comments, stage directions (`[Cut to...]`) | Horizontal rules → long pause |
+| `↩` footnote-return marks, `√` root sign | |
 
 Indented (4-space) blocks are **not** treated as code: in prose that indentation is far more often
 a quotation or a verse.
@@ -146,7 +147,8 @@ a quotation or a verse.
 ### Excluding a region
 
 Fence it in the body. An unclosed `stop` excludes everything to the end of the file — useful for
-a long references or notes section.
+a long references or notes section. Markers are case-insensitive; `start` is a synonym for
+`restart`.
 
 ```markdown
 <!--audio stop-->
@@ -159,7 +161,7 @@ Bibliography, notes, anything that should not be read aloud.
 ## Pause markers
 
 Preprocessing produces an intermediate form carrying markers, which each provider renders in its
-own way. This is why one pipeline feeds three different APIs.
+own way. This is why one pipeline feeds every provider.
 
 | Marker | Google (SSML) | OpenAI-style | Grok-style |
 |--------|---------------|--------------|------------|
@@ -218,11 +220,14 @@ sequential calls.
 One OpenAI-shaped `/audio/speech` backend with three presets. `compatible` takes its values from
 frontmatter or flags, so any service using the same request shape works.
 
-| Provider | Endpoint | Model | Voice | Key | Chunk limit |
-|----------|----------|-------|-------|-----|-------------|
-| `openai` | `api.openai.com` | `tts-1-hd` | `onyx` | `OPENAI_API_KEY` | 4000 |
-| `grok` | `api.x.ai` | `grok-tts` | `tara` | `XAI_API_KEY` | 14000 |
-| `compatible` | *required* | *required* | *required* | *required* | 4000 |
+| Provider | Endpoint | Model | Voice | Key | Chunk limit | Markers | Sends `speed` |
+|----------|----------|-------|-------|-----|-------------|---------|---------------|
+| `openai` | `api.openai.com` | `tts-1-hd` | `onyx` | `OPENAI_API_KEY` | 4000 | punctuation | yes |
+| `grok` | `api.x.ai` | `grok-tts` | `tara` | `XAI_API_KEY` | 14000 | tags | no |
+| `compatible` | *required* | *required* | *required* | *required* | 4000 | punctuation | no |
+
+`speaking_rate` is passed as `speed` only where the column says so; the other presets ignore
+it. `markers` picks how pause markers render (see table above) and can be overridden.
 
 ```bash
 gentts -p compatible --url https://tts.local/v1/audio/speech \
@@ -247,6 +252,9 @@ respelling, emitted as `<sub alias>`. The respelling form exists because Chirp 3
 normaliser spells all-consonant clusters out as initialisms and **overrides `<phoneme>` but not
 `<sub>`**. Substituted aliases also get a leading 50 ms break, or Chirp glues the alias onto the
 preceding word ("root dhṛ" → "rootdree").
+
+Matching is whole-word and case-insensitive, longest term first. Keys beginning with `_` are
+comments and ignored.
 
 Lookup order:
 
@@ -277,9 +285,9 @@ a single sentence longer than the limit would otherwise be rejected outright.
 ```
   -l, --list              list files and audio status, generate nothing
   -r, --recursive         recurse into directory arguments
-      --preview           show processed text and first chunk, no API call
-      --dump-text FILE    write the spoken text to FILE and exit, no API call
-  -F, --force             regenerate even if the output exists
+      --preview           show processed text and first chunk, no API call (single input)
+      --dump-text FILE    write the spoken text to FILE and exit, no API call (single input)
+  -F, --force             regenerate even if the output is current; overrides audio.skip
       --stamp             write audio.file/duration back into the frontmatter
   -T, --timestamp         set the output MP3's mtime to the input file's mtime
   -p, --provider P        google | openai | grok | compatible
