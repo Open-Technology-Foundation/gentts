@@ -376,6 +376,47 @@ class HttpRetry(unittest.TestCase):
     self.assertEqual(len(calls), 2)
 
 
+class Blockquotes(unittest.TestCase):
+  """2.17: nested markers are stripped; lazy continuation stays in the quote."""
+
+  def test_nested_markers_removed(self):
+    out = G['preprocess_content']('> quote line\n> > nested\n> >> deeper\n\nafter')
+    self.assertNotIn('>', out)
+    self.assertIn('[QUOTE_START]\nquote line\nnested\ndeeper\n[QUOTE_END]', out)
+
+  def test_lazy_continuation_stays_quoted(self):
+    out = G['preprocess_content']('> quote\nlazy line\n\nafter')
+    self.assertIn('[QUOTE_START]\nquote\nlazy line\n[QUOTE_END]\n\nafter', out)
+
+
+class Abbreviations(unittest.TestCase):
+  """2.18: Dr., Mr., e.g. are not sentence ends."""
+
+  def test_no_ssml_break_after_abbreviation(self):
+    out = G['text_to_ssml']('Dr. Smith paid 3.5 dollars, e.g. yes. Mr. Jones', None)
+    for abbr in ('Dr.', 'e.g.', 'Mr.'):
+      self.assertNotIn(f'{abbr}<break', out, abbr)
+    self.assertIn('yes.<break time="330ms"/>', out)
+
+  def test_chunking_keeps_title_with_name(self):
+    chunks = G['split_on_sentences']('Mr. Smith went home. ' * 3, 30)
+    self.assertEqual(len(chunks), 3)
+    for c in chunks:
+      self.assertTrue(c.startswith('Mr. Smith'), c)
+
+
+class NestedEmphasis(unittest.TestCase):
+  """2.19: no literal ** survives nested emphasis."""
+
+  def test_bold_containing_italic(self):
+    self.assertEqual(G['preprocess_content']('This is **bold *italic* bold** done.'),
+                     'This is bold italic bold done.')
+
+  def test_pairing_does_not_bleed_into_later_bold(self):
+    self.assertEqual(G['preprocess_content']('**bold *ital* bold** and **plain**'),
+                     'bold ital bold and plain')
+
+
 if __name__ == '__main__':
   unittest.main()
 

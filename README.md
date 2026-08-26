@@ -139,7 +139,7 @@ speech.
 | Removed entirely | Kept, markup dropped |
 |------------------|----------------------|
 | Fenced code blocks (``` and ~~~) | Headings → pause markers |
-| Markdown pipe tables (2+ consecutive `\|` lines) | Blockquotes → prosody span |
+| Markdown pipe tables (2+ consecutive `\|` lines) | Blockquotes → prosody span (nested `> >` flattened, lazy lines included) |
 | HTML `table`, `pre`, `style`, `script`, `audio`, `video`, `figure`, `iframe` | Bullet and ordered-list markers |
 | `<image>`, `<vidframe>`, `<IKLAN>`, music-player sections | Bold, italic, links, wiki-links |
 | Footnote references (`[^1]`, `[12]`) and definitions, including indented continuation paragraphs | `figcaption` text |
@@ -180,7 +180,9 @@ own way. This is why one pipeline feeds every provider.
 | `[PAUSE_MICRO]` | `<break time="150ms"/>` | space | space |
 
 Paragraph breaks become 1000 ms, single newlines 200 ms, sentence ends 330 ms — so a paragraph
-boundary carries ~1.5 s in total (sentence + paragraph + newline breaks combine).
+boundary carries ~1.5 s in total (sentence + paragraph + newline breaks combine). A full stop
+after a common abbreviation (`Dr.`, `Mr.`, `e.g.`, `etc.`) is not a sentence end: no break, and
+no chunk boundary between a title and its name.
 
 `[PAUSE_MICRO]` is Google-only. Chirp 3 HD is autoregressive and loses its place inside very
 long sentences, skipping or repeating whole clauses (reproducibly: a 590-character sentence of

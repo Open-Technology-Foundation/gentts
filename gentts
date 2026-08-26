@@ -136,6 +136,17 @@ OPENAI_COMPATIBLE = {
 PROVIDERS = ('google', *OPENAI_COMPATIBLE)
 
 DEFAULT_SPEAKING_RATE = 0.95
+
+# A full stop after one of these is not a sentence end: no 330ms break, and
+# no chunk boundary that would separate "Mr." from "Smith".
+ABBREVIATIONS = ('Dr', 'Mr', 'Mrs', 'Ms', 'Prof', 'St', 'Jr', 'Sr', 'vs', 'cf', 'etc',
+                 'e.g', 'i.e', 'No', 'pp', 'p')
+# Before the punctuation (for inserting a break after it) ...
+SENTENCE_PUNCT_RE = re.compile(
+  ''.join(f'(?<!\\b{re.escape(a)})' for a in ABBREVIATIONS) + r'([.!?])(?=\s)')
+# ... and after it (for splitting on the following whitespace).
+SENTENCE_SPLIT_RE = re.compile(
+  ''.join(f'(?<!\\b{re.escape(a)}\\.)' for a in ABBREVIATIONS) + r'(?<=[.!?])\s+')
 RETRY_HTTP_CODES = {429, 500, 502, 503, 504}
 SILENCE_SECONDS = 0.5
 
@@ -360,6 +371,9 @@ def strip_markdown(text):
   text = re.sub(r'___([^_]+?)___', r'\1', text)
   text = re.sub(r'__([^_]+?)__', r'\1', text)
   text = re.sub(r'(?<!\w)_([^_]+?)_(?!\w)', r'\1', text)
+  # Nested emphasis (**bold *italic* bold**) defeats the paired passes above
+  # and would leave literal asterisks to be spoken; drop any survivors.
+  text = re.sub(r'\*{2,}|(?<!\w)_{2,}(?!\w)', '', text)
 
   # Links and images
   text = re.sub(r'!\[[^\]]*\]\([^)]+\)', '', text)
@@ -421,7 +435,13 @@ def process_blockquotes(text):
       if not in_quote:
         result.append('[QUOTE_START]')
         in_quote = True
-      result.append(stripped[1:].lstrip())
+      # Strip every level of "> > >": nested quoted email is common, and a
+      # leftover ">" would be spoken (as &gt; inside the prosody span).
+      result.append(re.sub(r'^(?:>[ \t]*)+', '', stripped))
+    elif in_quote and stripped:
+      # Lazy continuation: an unmarked non-blank line still belongs to the
+      # quote (CommonMark), so do not close it mid-paragraph.
+      result.append(stripped)
     else:
       if in_quote:
         result.append('[QUOTE_END]')
@@ -635,7 +655,7 @@ def text_to_ssml(text, lexicon):
   # lookahead, not consumed: eating it would destroy the first newline of a
   # \n\n pair and the paragraph break below would never fire, collapsing
   # paragraph pauses to 500ms.
-  text = re.sub(r'([.!?])(?=\s)', r'\1<break time="330ms"/>', text)
+  text = SENTENCE_PUNCT_RE.sub(r'\1<break time="330ms"/>', text)
   # Paragraph and line breaks
   # 1000ms here + 330ms sentence break + 200ms newline = ~1.5s between
   # paragraphs (author-tuned 2026-08-12; 1400ms read as too slow, 300ms
@@ -699,7 +719,7 @@ def split_on_sentences(text, max_chars):
   if len(text) <= max_chars:
     return [text]
 
-  sentences = re.split(r'(?<=[.!?])\s+', text)
+  sentences = SENTENCE_SPLIT_RE.split(text)
   chunks = []
   current = ''
 
