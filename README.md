@@ -25,8 +25,8 @@ gentts -p openai essay.md            # different provider
 gentts -F essay.md                   # regenerate over an existing MP3
 ```
 
-A file is skipped when its audio is **current** — the MP3 exists and is as new as the Markdown
-(equal timestamps, as `-T` sets, count as current). A `.md` newer than its MP3 regenerates
+A file is skipped when its audio is **current** — the MP3 exists, is non-empty and is as new as
+the Markdown (equal timestamps, as `-T` sets, count as current). A `.md` newer than its MP3 regenerates
 automatically; `-F` forces regeneration regardless.
 
 ---
@@ -112,6 +112,9 @@ Resolved in this order:
 3. `-O DIR` — batch output directory, file named after the Markdown stem
 4. sibling `<stem>.mp3`
 
+Two inputs resolving to the same output (same stem in different directories under `-O`, say)
+abort the run with exit 22 before any provider is called.
+
 A **bare filename** in `audio.output` names the file but not the directory, so `-O` still supplies
 the directory. That lets a repository declare its published audio filename without committing
 anyone's deployment path:
@@ -139,12 +142,13 @@ speech.
 | Markdown pipe tables (2+ consecutive `\|` lines) | Blockquotes → prosody span |
 | HTML `table`, `pre`, `style`, `script`, `audio`, `video`, `figure`, `iframe` | Bullet and ordered-list markers |
 | `<image>`, `<vidframe>`, `<IKLAN>`, music-player sections | Bold, italic, links, wiki-links |
-| Footnote references and definitions | `figcaption` text |
+| Footnote references (`[^1]`, `[12]`) and definitions | `figcaption` text |
 | HTML comments, stage directions (`[Cut to...]`) | Horizontal rules → long pause |
 | `↩` footnote-return marks, `√` root sign | |
 
 Indented (4-space) blocks are **not** treated as code: in prose that indentation is far more often
-a quotation or a verse.
+a quotation or a verse. Likewise `[Law 22/1999]` is prose, not a footnote, and a line beginning
+`1999. ` is a year, not a list item (list markers are at most three digits).
 
 ### Excluding a region
 
@@ -276,7 +280,10 @@ Lookup order:
 ## Chunking
 
 Providers cap request size, so long documents are split and the parts concatenated with 0.5 s of
-silence between them.
+silence between them. The result is assembled as `<output>.part` and moved into place only after
+ffprobe reports a duration, so an interrupted or failed run never replaces a good MP3 with a
+truncated one. Non-Google responses that are not MP3 (a proxy's JSON error with status 200) fail
+the run rather than being written.
 
 Google chunks on **bytes** of SSML (3500, under the 5000 limit — break tags are most of the
 overhead), splitting at `<break>` tags, then sentences. `<prosody>` spans crossing a chunk
@@ -356,7 +363,7 @@ GPL-3.0 — see [LICENSE](LICENSE).
 | 4 | malformed frontmatter or lexicon |
 | 18 | missing required command |
 | 19 | missing API key or GCP quota project |
-| 22 | invalid option or incomplete provider configuration |
+| 22 | invalid option, incomplete provider configuration, or output collision |
 | 130 | interrupted |
 
 #fin

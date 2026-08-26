@@ -317,7 +317,8 @@ def strip_list_markers(text):
   Runs before emphasis stripping so a '* item' bullet is never mistaken for
   an unterminated emphasis marker."""
   text = re.sub(r'^[ \t]*[-*+][ \t]+', '', text, flags=re.MULTILINE)
-  text = re.sub(r'^[ \t]*\d+[.)][ \t]+', '', text, flags=re.MULTILINE)
+  # Up to three digits: a hard-wrapped year ("1999. That was...") is prose.
+  text = re.sub(r'^[ \t]*\d{1,3}[.)][ \t]+', '', text, flags=re.MULTILINE)
   return text
 
 
@@ -334,8 +335,10 @@ def strip_markdown(text):
   text = re.sub(r'!\[[^\]]*\]\([^)]+\)', '', text)
   text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
 
-  # Footnote references: [^1], [1], [2] ...
-  text = re.sub(r'\[\^?[^\]]*\d+[^\]]*\]', '', text)
+  # Footnote references: [^1], [^note], [1], [2,3]. Only these shapes: a
+  # bracketed phrase that merely contains a digit ("[Law 22/1999]") is prose.
+  text = re.sub(r'\[\^[^\]]+\]', '', text)
+  text = re.sub(r'\[\d{1,3}(?:,\s*\d{1,3})*\]', '', text)
 
   return text
 
@@ -440,12 +443,13 @@ def preprocess_content(content):
   text = strip_fenced_code(text)
   text = strip_custom_tags(text)
 
-  # Stage 2: structural elements -> markers
-  text = process_hr(text)
+  # Stage 2: structural elements -> markers. Headings before rules: a setext
+  # H2 underline is "---", which process_hr would otherwise consume first.
   text = strip_md_tables(text)
   text = process_blockquotes(text)
   text = strip_list_markers(text)
   text = process_headings(text)
+  text = process_hr(text)
 
   # Stage 3: strip formatting
   text = strip_footnote_defs(text)
@@ -896,6 +900,9 @@ def synthesize_openai_compatible(text_chunks, tmpdir, cfg):
     audio = post_json(cfg['url'], json.dumps(body).encode('utf-8'), headers)
     if not audio:
       raise TTSError(f'empty audio returned for chunk {i + 1}')
+    if not looks_like_mp3(audio):
+      raise TTSError(f'chunk {i + 1}: response is not MP3: '
+                     f'{audio[:300].decode("utf-8", "replace")}')
 
     chunk_path = os.path.join(tmpdir, f'chunk_{i:04d}.mp3')
     with open(chunk_path, 'wb') as f:
@@ -938,6 +945,35 @@ def get_audio_duration(filepath):
     return float(result.stdout.strip())
   except (subprocess.CalledProcessError, ValueError, FileNotFoundError):
     return 0.0
+
+
+def looks_like_mp3(data):
+  """True if data starts with an ID3 tag or an MPEG frame sync.
+
+  An endpoint that answers 200 with a JSON error body must not become a
+  zero-length "current" MP3 that the skip guard then honours forever."""
+  return data.startswith(b'ID3') or (len(data) > 1 and data[0] == 0xFF and data[1] & 0xE0 == 0xE0)
+
+
+def output_is_current(md_path, output_path):
+  """Output exists, is non-empty, and is as new as its source.
+
+  The <= is deliberate: -T gives both files the same mtime."""
+  if not output_path.exists() or output_path.stat().st_size == 0:
+    return False
+  return md_path.stat().st_mtime <= output_path.stat().st_mtime
+
+
+def finalize_output(part_path, output_path):
+  """Atomically move a finished .part file over output_path.
+
+  Refuses empty or unreadable audio so a failed run never replaces a good
+  MP3 with a truncated one."""
+  if part_path.stat().st_size == 0:
+    raise TTSError('assembled audio is empty')
+  if get_audio_duration(part_path) <= 0.0:
+    raise TTSError('assembled audio has no readable duration')
+  os.replace(part_path, output_path)
 
 
 def format_duration(seconds):
@@ -1095,14 +1131,13 @@ def process_file(md_path, args):
   info(f'  Title: {meta.get("title", "-")}\n  Lang:  {cfg["language"]}')
 
   if output_path.exists() and not args.force and not (args.preview or args.dump_text):
-    # Same-or-newer output is current; regenerate only when the md is newer
-    # (stale, matching the -l check). Same-timestamp outputs come from -T.
-    if md_path.stat().st_mtime <= output_path.stat().st_mtime:
+    # Regenerate only when stale (md newer, matching the -l check) or empty.
+    if output_is_current(md_path, output_path):
       info(f'  SKIPPED: {output_path} is current '
            f'({format_duration(get_audio_duration(output_path))}). '
            'Use --force to regenerate.')
       return
-    info('  Source is newer than existing audio: regenerating')
+    info('  Existing audio is stale or empty: regenerating')
 
   if meta['audio'].get('strip_h1'):
     body = strip_leading_h1(body)
@@ -1145,6 +1180,9 @@ def process_file(md_path, args):
     info(f'  Endpoint: {cfg["url"]}  Key: ${cfg["key_env"]}')
   output_path.parent.mkdir(parents=True, exist_ok=True)
 
+  # Assemble beside the target and os.replace() only once verified, so an
+  # interrupt or bad response never leaves a truncated file in place.
+  part_path = output_path.with_name(output_path.name + '.part')
   tmpdir = tempfile.mkdtemp(prefix='gentts_')
   try:
     if cfg['provider'] == 'google':
@@ -1153,15 +1191,17 @@ def process_file(md_path, args):
       chunk_files = synthesize_openai_compatible(chunks, tmpdir, cfg)
 
     if len(chunk_files) == 1:
-      shutil.move(chunk_files[0], str(output_path))
+      shutil.move(chunk_files[0], str(part_path))
     else:
-      concatenate_audio(chunk_files, output_path, tmpdir)
+      concatenate_audio(chunk_files, part_path, tmpdir)
+    finalize_output(part_path, output_path)
   except TTSError as e:
     die(1, f'{md_path}: {e}')
   except subprocess.CalledProcessError as e:
     die(1, f'{md_path}: ffmpeg failed: {e.stderr.decode("utf-8", "replace")[:300]}')
   finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
+    part_path.unlink(missing_ok=True)
 
   duration = get_audio_duration(output_path)
   size_mb = output_path.stat().st_size / (1024 * 1024)
@@ -1215,7 +1255,7 @@ def list_files(paths, args):
     elif output_path.exists():
       # An md newer than its mp3 means the audio no longer matches the text.
       # Meaningful when generation used -T, which syncs the two mtimes.
-      if md_path.stat().st_mtime > output_path.stat().st_mtime:
+      if not output_is_current(md_path, output_path):
         status = 'stale'
         stale += 1
       else:
@@ -1265,6 +1305,20 @@ def collect_inputs(items, recursive):
       seen.add(key)
       unique.append(p)
   return unique
+
+
+def find_output_collisions(paths, args):
+  """[(output_path, [md_paths...])] for every output claimed by more than one input.
+
+  Same-stem files in different directories under -O would otherwise share
+  one MP3: the first writes it, the rest see it as current and skip."""
+  claims = {}
+  for md_path in paths:
+    meta, _ = read_markdown(md_path)
+    if meta['audio'].get('skip'):
+      continue
+    claims.setdefault(resolve_output(md_path, meta, args).resolve(), []).append(md_path)
+  return [(out, mds) for out, mds in claims.items() if len(mds) > 1]
 
 
 def check_dependencies():
@@ -1393,6 +1447,10 @@ def main():
     die(22, '--preview takes a single input file (it would dump every file\'s text)')
   if args.dump_text and len(paths) > 1:
     die(22, '--dump-text takes a single input file')
+
+  for out, mds in find_output_collisions(paths, args):
+    die(22, f'{len(mds)} inputs resolve to the same output {out}: '
+            f'{", ".join(str(m) for m in mds)}')
 
   check_dependencies()
 

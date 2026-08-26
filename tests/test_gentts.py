@@ -144,6 +144,98 @@ class RealWorldChapter(unittest.TestCase):
     self.assertIn('Total chunks:', r.stdout)
 
 
+class SetextHeadings(unittest.TestCase):
+  """2.13: a --- underline after text is an H2, not a horizontal rule."""
+
+  def test_setext_h2_becomes_heading(self):
+    out = G['preprocess_content']('Intro.\n\nChapter Two\n---\n\nBody.')
+    self.assertIn('[PAUSE_MEDIUM]Chapter Two[PAUSE_SHORT]', out)
+    self.assertNotIn('[PAUSE_XLONG]', out)
+
+  def test_real_hr_still_long_pause(self):
+    self.assertIn('[PAUSE_XLONG]', G['preprocess_content']('One.\n\n---\n\nTwo.'))
+
+
+class FootnoteReferences(unittest.TestCase):
+  """2.8: only footnote-shaped brackets are deleted."""
+
+  def test_bracketed_prose_with_digits_kept(self):
+    out = G['preprocess_content']('Under [Law 22/1999] the region [circa 1850] was split.')
+    self.assertEqual(out, 'Under [Law 22/1999] the region [circa 1850] was split.')
+
+  def test_footnote_refs_removed(self):
+    self.assertEqual(G['preprocess_content']('Word[^1] and word[12] and[^note].'),
+                     'Word and word and.')
+
+
+class OrderedListMarkers(unittest.TestCase):
+  """2.9: a sentence-initial year is not a list marker."""
+
+  def test_year_kept(self):
+    out = G['preprocess_content']('It ended in\n1999. That was the year.')
+    self.assertIn('1999. That was the year.', out)
+
+  def test_list_marker_stripped(self):
+    self.assertEqual(G['preprocess_content']('1. first\n2. second'), 'first\nsecond')
+
+
+class OutputCollisions(unittest.TestCase):
+  """2.7: two inputs resolving to one MP3 is an error before any billing."""
+
+  def test_same_stem_in_two_dirs_detected(self):
+    with tempfile.TemporaryDirectory() as d:
+      a = Path(d) / 'p1' / 'ch1.md'
+      b = Path(d) / 'p2' / 'ch1.md'
+      for f in (a, b):
+        f.parent.mkdir()
+        f.write_text('x')
+      args = argparse.Namespace(output=None, outdir=d)
+      dupes = G['find_output_collisions']([a, b], args)
+      self.assertEqual(len(dupes), 1)
+      self.assertEqual(sorted(dupes[0][1]), sorted([a, b]))
+
+  def test_distinct_stems_clean(self):
+    with tempfile.TemporaryDirectory() as d:
+      a = Path(d) / 'a.md'
+      b = Path(d) / 'b.md'
+      a.write_text('x')
+      b.write_text('x')
+      args = argparse.Namespace(output=None, outdir=None)
+      self.assertEqual(G['find_output_collisions']([a, b], args), [])
+
+
+class OutputValidation(unittest.TestCase):
+  """2.5/2.11: a bad response never becomes a "current" MP3."""
+
+  def test_json_body_is_not_mp3(self):
+    self.assertFalse(G['looks_like_mp3'](b'{"error":{"message":"model not loaded"}}'))
+
+  def test_id3_and_sync_frames_are_mp3(self):
+    self.assertTrue(G['looks_like_mp3'](b'ID3\x04\x00' + b'\x00' * 10))
+    self.assertTrue(G['looks_like_mp3'](b'\xff\xfb\x90\x00' + b'\x00' * 10))
+
+  def test_empty_output_is_not_current(self):
+    with tempfile.TemporaryDirectory() as d:
+      md = Path(d) / 'a.md'
+      mp3 = Path(d) / 'a.mp3'
+      md.write_text('x')
+      time.sleep(0.01)
+      mp3.write_bytes(b'')
+      self.assertFalse(G['output_is_current'](md, mp3))
+      mp3.write_bytes(b'\xff\xfb' + b'\x00' * 100)
+      self.assertTrue(G['output_is_current'](md, mp3))
+
+  def test_finalize_rejects_empty_and_keeps_existing(self):
+    with tempfile.TemporaryDirectory() as d:
+      good = Path(d) / 'out.mp3'
+      good.write_bytes(b'GOOD')
+      part = Path(d) / 'part.mp3'
+      part.write_bytes(b'')
+      with self.assertRaises(G['TTSError']):
+        G['finalize_output'](part, good)
+      self.assertEqual(good.read_bytes(), b'GOOD')
+
+
 if __name__ == '__main__':
   unittest.main()
 
