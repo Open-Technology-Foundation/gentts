@@ -17,6 +17,7 @@ a docs directory, a single essay.
 ```bash
 gentts essay.md                      # -> essay.mp3
 gentts --preview essay.md            # show processed text + first chunk, no API call
+gentts --dump-text essay.txt essay.md # write the spoken text to a file, no API call
 gentts -l chapters/                  # list files and audio status
 gentts -O audio/ chapters/           # batch a directory into audio/
 gentts --stamp -O audio/ chapters/   # ... and record file/duration in each frontmatter
@@ -167,9 +168,22 @@ own way. This is why one pipeline feeds three different APIs.
 | `[PAUSE_LONG]` | `<break time="1200ms"/>` | blank line | `[long-pause]` |
 | `[PAUSE_XLONG]` | `<break time="2000ms"/>` | `...` | `[long-pause] [long-pause]` |
 | `[QUOTE_START/END]` | `<prosody rate="95%" pitch="-1st">` | newline | `[pause]` |
+| `[PAUSE_MICRO]` | `<break time="150ms"/>` | space | space |
 
 Paragraph breaks become 1000 ms, single newlines 200 ms, sentence ends 330 ms — so a paragraph
 boundary carries ~1.5 s in total (sentence + paragraph + newline breaks combine).
+
+`[PAUSE_MICRO]` is Google-only. Chirp 3 HD is autoregressive and loses its place inside very
+long sentences, skipping or repeating whole clauses (reproducibly: a 590-character sentence of
+parallel "that ...;" clauses dropped 240 characters on every attempt). Sentences longer than
+240 characters therefore get a 150 ms micro-break at their own semicolons, colons and commas,
+which stabilises the model without changing the text. Other providers render it as a plain space.
+
+### Dumping the spoken text
+
+`--dump-text FILE` writes exactly what would be spoken — preamble included, markers replaced by
+paragraph breaks — and exits without calling any API. Use it to feed forced-alignment or
+captioning tools the same words the audio contains. Single input only.
 
 ---
 
@@ -264,6 +278,7 @@ a single sentence longer than the limit would otherwise be rejected outright.
   -l, --list              list files and audio status, generate nothing
   -r, --recursive         recurse into directory arguments
       --preview           show processed text and first chunk, no API call
+      --dump-text FILE    write the spoken text to FILE and exit, no API call
   -F, --force             regenerate even if the output exists
       --stamp             write audio.file/duration back into the frontmatter
   -T, --timestamp         set the output MP3's mtime to the input file's mtime

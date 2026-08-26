@@ -86,5 +86,15 @@
   "svadharma": {"say": "svadarma"},
 
   "_comment_javanese": "Indonesian/Javanese terms Chirp3-HD mispronounces even with IPA <phoneme> (the normaliser reshapes it); respell chosen by ear, 2026-07-01. Javanese final -a raises to /ɔ/ ('aw/oh'): krama->kromo, Kalimasada->Kalimosodo.",
-  "cilik": {"say": "chilik"}
+  "cilik": {"say": "chilik"},
+
+  "_comment_mindful_solidarity": "Pali/Sanskrit names and terms from Mike Slott's Mindful Solidarity (scan 2026-08-16). UNVERIFIED — respellings proposed, not yet auditioned by ear; check before next regeneration.",
+  "Thich Nhat Hanh": {"say": "tik naht hahn"},
+  "Ñāṇavīra": {"say": "nyah-nah-vee-ra"},
+  "Satipaṭṭhāna": {"say": "sah-tee-pat-tah-na"},
+  "Mālunkyāputta": {"say": "mah-loon-kyah-poot-ta"},
+  "Anālayo": {"say": "ah-nah-lah-yo"},
+  "Analayo": {"say": "ah-nah-lah-yo"},
+  "Gramsci": {"say": "grahm-shee"},
+  "anicca": {"say": "a-nitcha"}
 }
