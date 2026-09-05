@@ -1182,6 +1182,13 @@ def resolve_output(md_path, meta, args):
   return md_path.with_suffix('.mp3')
 
 
+def end_sentence(text):
+  """Close a spoken fragment with a full stop unless it already ends in one,
+  a question mark, an exclamation mark or an ellipsis ("What is this?")."""
+  text = text.rstrip()
+  return text if text.endswith(('.', '?', '!', '…')) else text + '.'
+
+
 def build_preamble(meta):
   """Spoken title / subtitle / author / date block.
 
@@ -1192,10 +1199,10 @@ def build_preamble(meta):
   parts = []
   title = audio.get('title', meta.get('title'))
   if title:
-    parts.append(f'{title}.\n\n')
+    parts.append(f'{end_sentence(title)}\n\n')
   subtitle = audio.get('subtitle', meta.get('subtitle'))
   if subtitle:
-    parts.append(f'{subtitle}.\n\n')
+    parts.append(f'{end_sentence(subtitle)}\n\n')
 
   author = audio.get('author', meta.get('author'))
   date_str = format_date(audio.get('date', meta.get('date')))

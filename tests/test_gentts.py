@@ -475,4 +475,17 @@ class ConcatenateToPartFile(unittest.TestCase):
 if __name__ == '__main__':
   unittest.main()
 
+
+
+class PreambleTerminalPunctuation(unittest.TestCase):
+  """A title that already ends in ? or ! must not gain a trailing full stop."""
+
+  def test_question_title_keeps_its_question_mark_alone(self):
+    text = G['build_preamble']({'title': 'What is this?', 'audio': {}})
+    self.assertEqual(text, 'What is this?\n\n')
+
+  def test_plain_title_still_gets_a_full_stop(self):
+    text = G['build_preamble']({'title': 'Mindful Solidarity', 'audio': {'subtitle': 'A dialogue!'}})
+    self.assertEqual(text, 'Mindful Solidarity.\n\nA dialogue!\n\n')
+
 #fin
