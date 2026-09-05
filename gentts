@@ -531,30 +531,38 @@ def load_lexicon(path):
   return {k: v for k, v in data.items() if not str(k).startswith('_')}
 
 
-def resolve_lexicon_path(md_path, audio_meta, cli_lexicon, language):
-  """--lexicon > frontmatter audio.lexicon > <md dir>/tts_lexicon.json > bundled.
+def resolve_lexicon(md_path, audio_meta, cli_lexicon, language):
+  """Merged lexicon, layered so that later sources win per key:
 
-  An explicitly chosen lexicon always applies. The bundled fallback holds
-  foreign terms respelled for an English voice, so it applies to English
-  content only. `audio.lexicon: false` disables lexicon substitution."""
-  if cli_lexicon:
-    p = Path(cli_lexicon).expanduser()
-    if not p.exists():
-      die(3, f'lexicon not found: {p}')
-    return p
+    bundled (English content only) < <md dir>/tts_lexicon.json
+      < frontmatter audio.lexicon < --lexicon
+
+  A project lexicon therefore extends the bundled one rather than replacing
+  it. `audio.lexicon: false` disables lexicon substitution entirely."""
   fm = audio_meta.get('lexicon')
   if fm is False:
-    return None
+    return {}
+  layers = []
+  bundled = SCRIPT_DIR / 'tts_lexicon.json'
+  if language == 'en' and bundled.exists():
+    layers.append(bundled)
+  local = md_path.parent / 'tts_lexicon.json'
+  if local.exists():
+    layers.append(local)
   if fm:
     p = (md_path.parent / str(fm)).expanduser()
     if not p.exists():
       die(3, f'{md_path}: lexicon not found: {p}')
-    return p
-  local = md_path.parent / 'tts_lexicon.json'
-  if local.exists():
-    return local
-  bundled = SCRIPT_DIR / 'tts_lexicon.json'
-  return bundled if bundled.exists() and language == 'en' else None
+    layers.append(p)
+  if cli_lexicon:
+    p = Path(cli_lexicon).expanduser()
+    if not p.exists():
+      die(3, f'lexicon not found: {p}')
+    layers.append(p)
+  merged = {}
+  for p in layers:
+    merged.update(load_lexicon(p))
+  return merged
 
 
 # --- SSML generation (Google) ---
@@ -1261,8 +1269,7 @@ def process_file(md_path, args):
 
   # Render markers for the provider, then chunk
   if cfg['provider'] == 'google':
-    lexicon = load_lexicon(
-      resolve_lexicon_path(md_path, meta['audio'], args.lexicon, cfg['language']))
+    lexicon = resolve_lexicon(md_path, meta['audio'], args.lexicon, cfg['language'])
     chunks = chunk_ssml(text_to_ssml(add_clause_breaks(text), lexicon))
   else:
     rendered = text_to_tags(text) if cfg['markers'] == 'tags' else text_to_punctuation(text)

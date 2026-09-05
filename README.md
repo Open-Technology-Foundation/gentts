@@ -274,13 +274,16 @@ preceding word ("root dhṛ" → "rootdree").
 Matching is whole-word and case-insensitive, longest term first. Keys beginning with `_` are
 comments and ignored.
 
-Lookup order:
+Lexicons layer; every source that exists is loaded, and a later one wins per key:
 
-1. `--lexicon FILE`
-2. `audio.lexicon` in frontmatter (`false` disables)
-3. `tts_lexicon.json` beside the Markdown file
-4. the bundled `tts_lexicon.json` — **English content only**, since its entries respell foreign
+1. the bundled `tts_lexicon.json` — **English content only**, since its entries respell foreign
    terms for an English voice
+2. `tts_lexicon.json` beside the Markdown file
+3. `audio.lexicon` in frontmatter
+4. `--lexicon FILE`
+
+A project lexicon therefore extends the bundled one rather than replacing it. `audio.lexicon: false`
+disables substitution entirely.
 
 ---
 

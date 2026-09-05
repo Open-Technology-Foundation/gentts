@@ -488,4 +488,42 @@ class PreambleTerminalPunctuation(unittest.TestCase):
     text = G['build_preamble']({'title': 'Mindful Solidarity', 'audio': {'subtitle': 'A dialogue!'}})
     self.assertEqual(text, 'Mindful Solidarity.\n\nA dialogue!\n\n')
 
+
+class LexiconLayering(unittest.TestCase):
+  """Lexicons layer, later winning per key: bundled < <md dir>/tts_lexicon.json
+  < frontmatter audio.lexicon < --lexicon. audio.lexicon: false disables all."""
+
+  def setUp(self):
+    self.tmp = tempfile.TemporaryDirectory(); d = Path(self.tmp.name)
+    self.md = d / 'x.md'; self.md.write_text('hello\n')
+    (d / 'tts_lexicon.json').write_text('{"Foo": "fuː", "Tuwhiri": "LOCAL"}')
+    self.cli = d / 'cli.json'; self.cli.write_text('{"Foo": "CLI"}')
+    self.fm = d / 'fm.json'; self.fm.write_text('{"Foo": "FM", "Bar": "bɑː"}')
+
+  def tearDown(self):
+    self.tmp.cleanup()
+
+  def test_local_lexicon_extends_the_bundled_one(self):
+    lex = G['resolve_lexicon'](self.md, {}, None, 'en')
+    self.assertEqual(lex['Foo'], 'fuː')
+    self.assertIn('Gotama', lex)            # a bundled key still present
+
+  def test_local_overrides_bundled_per_key(self):
+    lex = G['resolve_lexicon'](self.md, {}, None, 'en')
+    self.assertEqual(lex['Tuwhiri'], 'LOCAL')
+
+  def test_frontmatter_then_cli_layer_on_top(self):
+    lex = G['resolve_lexicon'](self.md, {'lexicon': 'fm.json'}, None, 'en')
+    self.assertEqual((lex['Foo'], lex['Bar'], lex['Tuwhiri']), ('FM', 'bɑː', 'LOCAL'))
+    lex = G['resolve_lexicon'](self.md, {'lexicon': 'fm.json'}, str(self.cli), 'en')
+    self.assertEqual((lex['Foo'], lex['Bar']), ('CLI', 'bɑː'))
+
+  def test_bundled_applies_to_english_only(self):
+    lex = G['resolve_lexicon'](self.md, {}, None, 'id')
+    self.assertNotIn('Gotama', lex)
+    self.assertEqual(lex['Foo'], 'fuː')
+
+  def test_lexicon_false_disables_everything(self):
+    self.assertEqual(G['resolve_lexicon'](self.md, {'lexicon': False}, None, 'en'), {})
+
 #fin
