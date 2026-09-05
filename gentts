@@ -1224,6 +1224,57 @@ def build_preamble(meta):
   return ''.join(parts)
 
 
+# --- Cost log ---
+
+# List price per million characters, USD, as published 2026-09 (Google Cloud
+# TTS pricing page; OpenAI audio pricing). Google bills characters, SSML tags
+# included, so what is counted is exactly what is sent. Gemini-TTS voices
+# (bare names, no locale prefix) are billed per audio token instead and grok
+# does not publish a per-character rate: those rows carry no price.
+GOOGLE_PRICES = (
+  ('Chirp3-HD', 30.0), ('Chirp-HD', 30.0), ('Studio', 160.0), ('Neural2', 16.0),
+  ('Polyglot', 16.0), ('Wavenet', 4.0), ('Standard', 4.0),
+)
+OPENAI_PRICES = {'tts-1-hd': 30.0, 'tts-1': 15.0, 'gpt-4o-mini-tts': 12.0}
+COST_LOG_HEADER = ('timestamp', 'source', 'provider', 'voice', 'chars',
+                   'usd_per_million', 'cost_usd', 'audio_seconds', 'output')
+
+
+def billable_chars(chunks):
+  """Characters sent to the provider: the SSML (tags included) or plain text."""
+  return sum(len(c) for c in chunks)
+
+
+def price_per_million(provider, voice, model=None):
+  """USD per million characters for this provider/voice, None if not known."""
+  if provider == 'google':
+    for family, price in GOOGLE_PRICES:
+      if f'-{family}-' in (voice or ''):
+        return price
+    return None
+  if provider == 'openai':
+    return OPENAI_PRICES.get(model or '')
+  return None
+
+
+def append_cost_log(path, *, source, provider, voice, chars, seconds, output, model=None):
+  """Append one row to the CSV cost log, writing the header on first use."""
+  import csv
+  price = price_per_million(provider, voice, model)
+  row = (datetime.datetime.now().isoformat(timespec='seconds'), str(source), provider,
+         voice or '', chars, f'{price:.2f}' if price is not None else '',
+         f'{chars * price / 1e6:.4f}' if price is not None else '',
+         f'{seconds:.1f}', str(output))
+  path = Path(path)
+  path.parent.mkdir(parents=True, exist_ok=True)
+  new = not path.exists() or path.stat().st_size == 0
+  with path.open('a', newline='', encoding='utf-8') as fh:
+    w = csv.writer(fh)
+    if new:
+      w.writerow(COST_LOG_HEADER)
+    w.writerow(row)
+
+
 # --- Per-file processing ---
 
 def process_file(md_path, args):
@@ -1319,6 +1370,14 @@ def process_file(md_path, args):
   duration = get_audio_duration(output_path)
   size_mb = output_path.stat().st_size / (1024 * 1024)
   info(f'  Written: {output_path}\n  Duration: {format_duration(duration)}  Size: {size_mb:.1f} MB')
+
+  # Running cost log: --cost-log FILE, else $GENTTS_COST_LOG, else
+  # tts-costs.csv beside the output. Rows are appended, never rewritten.
+  cost_log = args.cost_log or os.environ.get('GENTTS_COST_LOG') or output_path.parent / 'tts-costs.csv'
+  if str(cost_log).lower() != 'none':
+    append_cost_log(cost_log, source=md_path, provider=cfg['provider'], voice=cfg['voice'],
+                    chars=billable_chars(chunks), seconds=duration, output=output_path.name,
+                    model=cfg.get('model'))
 
   if args.stamp:
     meta['audio']['file'] = os.path.relpath(output_path, md_path.parent)
@@ -1530,6 +1589,9 @@ def main():
   parser.add_argument('-m', '--model', help='model name (compatible provider)')
   parser.add_argument('--key-env', dest='key_env',
                       help='environment variable holding the API key')
+  parser.add_argument('--cost-log', dest='cost_log', metavar='FILE',
+                      help='CSV cost log to append to (default: tts-costs.csv beside the output, '
+                           'or $GENTTS_COST_LOG; "none" disables)')
   parser.add_argument('--chunk-limit', dest='chunk_limit', type=int,
                       help='max characters per request (non-google providers)')
   parser.add_argument('--markers', choices=['punctuation', 'tags'],

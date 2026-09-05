@@ -526,4 +526,34 @@ class LexiconLayering(unittest.TestCase):
   def test_lexicon_false_disables_everything(self):
     self.assertEqual(G['resolve_lexicon'](self.md, {'lexicon': False}, None, 'en'), {})
 
+
+class CostLog(unittest.TestCase):
+  """Every synthesis appends one CSV row: what was billed, at what rate."""
+
+  def test_billable_chars_counts_characters_of_every_chunk_sent(self):
+    # Google bills characters, SSML tags included; non-ASCII is one char each
+    self.assertEqual(G['billable_chars'](['<speak>ab</speak>', 'Sŏn']), 20)
+
+  def test_price_table_by_provider_and_voice_family(self):
+    p = G['price_per_million']
+    self.assertEqual(p('google', 'en-GB-Chirp3-HD-Iapetus'), 30.0)
+    self.assertEqual(p('google', 'en-GB-Studio-B'), 160.0)
+    self.assertEqual(p('google', 'en-AU-Neural2-A'), 16.0)
+    self.assertEqual(p('openai', 'onyx', 'tts-1-hd'), 30.0)
+    self.assertIsNone(p('google', 'Charon'))        # Gemini-TTS: token billed, unknown
+    self.assertIsNone(p('grok', 'tara', 'grok-tts'))
+
+  def test_append_writes_header_once_and_computes_cost(self):
+    with tempfile.TemporaryDirectory() as d:
+      log = Path(d) / 'tts-costs.csv'
+      G['append_cost_log'](log, source='a.md', provider='google', voice='en-GB-Chirp3-HD-Iapetus',
+                           chars=200000, seconds=1234.5, output='a.mp3')
+      G['append_cost_log'](log, source='b.md', provider='grok', voice='tara',
+                           chars=10, seconds=1.0, output='b.mp3', model='grok-tts')
+      lines = log.read_text().splitlines()
+      self.assertEqual(len(lines), 3)
+      self.assertEqual(lines[0], 'timestamp,source,provider,voice,chars,usd_per_million,cost_usd,audio_seconds,output')
+      self.assertTrue(lines[1].endswith(',google,en-GB-Chirp3-HD-Iapetus,200000,30.00,6.0000,1234.5,a.mp3'))
+      self.assertTrue(lines[2].endswith(',grok,tara,10,,,1.0,b.mp3'))
+
 #fin

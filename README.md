@@ -287,6 +287,21 @@ disables substitution entirely.
 
 ---
 
+## Cost log
+
+Every synthesis appends one row to a CSV: when, which file, provider, voice, characters
+billed, list price per million characters, the cost, audio seconds and the output name.
+The log is `tts-costs.csv` beside the output MP3, or `$GENTTS_COST_LOG`, or `--cost-log FILE`;
+`--cost-log none` disables it. Characters are counted as sent: for Google that is the SSML
+with its tags, which is what Google bills. Prices are the published list prices for the
+Google families (Chirp 3 HD and Chirp HD 30, Studio 160, Neural2 and Polyglot 16, WaveNet
+and Standard 4 USD per million) and OpenAI models; Gemini-TTS (billed per audio token) and
+grok rows carry no price. Sum a project with
+
+```bash
+python3 -c "import csv,sys; print(sum(float(r['cost_usd'] or 0) for r in csv.DictReader(open(sys.argv[1]))))" audio/tts-costs.csv
+```
+
 ## Chunking
 
 Providers cap request size, so long documents are split and the parts concatenated with 0.5 s of
