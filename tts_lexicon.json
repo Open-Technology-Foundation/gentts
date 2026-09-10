@@ -1,9 +1,7 @@
 {
   "_comment": "Pronunciation lexicon for Google Cloud TTS SSML <phoneme> tags (IPA)",
-
   "Toodyay": "ˈtuːdjeɪ",
   "Nullarbor": "ˈnʌləbɔːr",
-
   "Suharto": "suˈharto",
   "Soeharto": "suˈharto",
   "Sukarno": "suˈkarno",
@@ -12,7 +10,6 @@
   "Wahid": "waˈhid",
   "Jokowi": "dʒoˈkowi",
   "Prabowo": "praˈbowo",
-
   "hukum": "huˈkum",
   "adat": "ˈadat",
   "musyawarah": "muʃaˈwarah",
@@ -20,13 +17,11 @@
   "merdeka": "merˈdeka",
   "reformasi": "reforˈmasi",
   "otonomi": "otoˈnomi",
-
   "pesantren": "peˈsantren",
   "madrasah": "maˈdrasah",
   "Nahdlatul": "nahˈdlatul",
   "Muhammadiyah": "muhammadˈijah",
   "dakwah": "ˈdakwah",
-
   "Golkar": "ˈɡolkar",
   "PDI": "pedeˈi",
   "PKI": "pekaˈi",
@@ -34,7 +29,6 @@
   "MPR": "ɛmpeˈɛr",
   "NU": "ɛnˈu",
   "KPK": "kapeˈka",
-
   "rupiah": "ruˈpiah",
   "kampung": "kamˈpuŋ",
   "desa": "ˈdesa",
@@ -47,7 +41,6 @@
   "gubernur": "ɡuberˈnur",
   "presiden": "presiˈden",
   "sultan": "sulˈtan",
-
   "wayang": "ˈwajaŋ",
   "gamelan": "ˈɡamelan",
   "batik": "baˈtik",
@@ -55,7 +48,6 @@
   "nusantara": "nusanˈtara",
   "garuda": "ɡaˈruda",
   "pribumi": "priˈbumi",
-
   "jihad": "dʒiˈhad",
   "hadith": "haˈdiθ",
   "Ramadan": "ramaˈdan",
@@ -68,33 +60,67 @@
   "syariah": "ʃaˈriah",
   "halal": "haˈlal",
   "fiqh": "ˈfɪkh",
-
   "bapak": "ˈbapak",
   "ibu": "ˈibu",
   "saudara": "sauˈdara",
   "pemilu": "peˈmilu",
-
   "bhinneka": "bhinˈneka",
   "gotong royong": "ɡotoŋ ˈrojoŋ",
-
   "Tuwhiri": "tuˈfiɾi",
-
-
   "_comment_respell": "Object values emit <sub> respelling instead of IPA <phoneme>. Use for tokens Chirp spells out as initialisms (all-consonant clusters); the normaliser overrides <phoneme> but not <sub>.",
-  "dhṛ": {"say": "dree"},
-  "ṛta": {"say": "ritta"},
-  "svadharma": {"say": "svadarma"},
-
+  "dhṛ": {
+    "say": "dree"
+  },
+  "ṛta": {
+    "say": "ritta"
+  },
+  "svadharma": {
+    "say": "svadarma"
+  },
   "_comment_javanese": "Indonesian/Javanese terms Chirp3-HD mispronounces even with IPA <phoneme> (the normaliser reshapes it); respell chosen by ear, 2026-07-01. Javanese final -a raises to /ɔ/ ('aw/oh'): krama->kromo, Kalimasada->Kalimosodo.",
-  "cilik": {"say": "chilik"},
-
-  "_comment_mindful_solidarity": "Pali/Sanskrit names and terms from Mike Slott's Mindful Solidarity (scan 2026-08-16). UNVERIFIED — respellings proposed, not yet auditioned by ear; check before next regeneration.",
-  "Thich Nhat Hanh": {"say": "tik naht hahn"},
-  "Ñāṇavīra": {"say": "nyah-nah-vee-ra"},
-  "Satipaṭṭhāna": {"say": "sah-tee-pat-tah-na"},
-  "Mālunkyāputta": {"say": "mah-loon-kyah-poot-ta"},
-  "Anālayo": {"say": "ah-nah-lah-yo"},
-  "Analayo": {"say": "ah-nah-lah-yo"},
-  "Gramsci": {"say": "grahm-shee"},
-  "anicca": {"say": "a-nitcha"}
+  "cilik": {
+    "say": "chilik"
+  },
+  "_comment_mindful_solidarity": "Pali/Sanskrit names and terms from Mike Slott's Mindful Solidarity (scan 2026-08-16; Gotama/anatta/sunnata/Barre added 2026-09-05 from Ramsey Margolis's listening notes on the 12 Aug build: Gotama long o, anatta long final a, sunnata as Sanskrit shunyata, Barre MA as Barry; Sŏn (Korean 선) as British short-o /sɒn/ added 2026-09-10, the reading chosen by ear for What is this? — Martine Batchelor: 'SOHN as an English person says it').",
+  "Thich Nhat Hanh": {
+    "say": "tik naht hahn"
+  },
+  "Ñāṇavīra": {
+    "say": "nyah-nah-vee-ra"
+  },
+  "Satipaṭṭhāna": {
+    "say": "sah-tee-pat-tah-na"
+  },
+  "Mālunkyāputta": {
+    "say": "mah-loon-kyah-poot-ta"
+  },
+  "Anālayo": {
+    "say": "ah-nah-lah-yo"
+  },
+  "Analayo": {
+    "say": "ah-nah-lah-yo"
+  },
+  "Gramsci": {
+    "say": "grahm-shee"
+  },
+  "anicca": {
+    "say": "a-nitcha"
+  },
+  "Gotama": "ˈɡoːtəmə",
+  "anatta": {
+    "say": "a-nat-tah"
+  },
+  "sunnata": {
+    "say": "shoon-ya-tah"
+  },
+  "Barre": {
+    "say": "Barry"
+  },
+  "suññatā": {
+    "say": "shoon-ya-tah"
+  },
+  "anattā": {
+    "say": "a-nat-tah"
+  },
+  "Sŏn": "sɒn"
 }
