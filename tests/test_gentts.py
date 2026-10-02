@@ -251,6 +251,26 @@ class LexiconSubstitution(unittest.TestCase):
     minidom.parseString(f'<speak>{out}</speak>')
     self.assertIn('alphabet="ipa"', out)
 
+  def test_possessive_goes_inside_the_phoneme_tag(self):
+    from xml.dom import minidom
+    out = G['text_to_ssml']("Mazu's point.", {'Mazu': 'ˌmɑːˈdzuː'})
+    minidom.parseString(f'<speak>{out}</speak>')
+    self.assertIn('ph="ˌmɑːˈdzuːz">Mazu&apos;s</phoneme>', out)
+
+  def test_possessive_goes_inside_the_sub_alias(self):
+    out = G['apply_lexicon_ssml']('Tuwhiri’s founders', {'Tuwhiri': {'say': 'Toofeeree'}})
+    self.assertIn('<sub alias="Toofeeree&apos;s">Tuwhiri’s</sub>', out)
+
+  def test_possessive_ending_follows_the_last_sound(self):
+    self.assertEqual(G['possessive_ipa']('ˈdɛʃɑːn'), 'z')
+    self.assertEqual(G['possessive_ipa']('ˈbɒdɪdɑːmə'), 'z')
+    self.assertEqual(G['possessive_ipa']('ˈkɑːlt'), 's')
+    self.assertEqual(G['possessive_ipa']('ˈpɒlɪʃ'), 'ɪz')
+
+  def test_closing_quote_is_not_a_possessive(self):
+    out = G['apply_lexicon_ssml']('the word &apos;Chan&apos; is', {'Chan': 'tʃɑːn'})
+    self.assertIn('>Chan</phoneme>&apos; is', out)
+
 
 class SsmlChunkLimits(unittest.TestCase):
   """2.12: no chunk over the byte limit, no silence-only chunk."""

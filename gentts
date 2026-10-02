@@ -577,6 +577,17 @@ def escape_ssml(text):
   return text
 
 
+def possessive_ipa(ph):
+  """The IPA of English possessive 's after the pronunciation ph: /ɪz/ after a
+  sibilant, /s/ after another voiceless consonant, /z/ otherwise."""
+  last = ph.rstrip('ːˑˈˌ .')[-1:]
+  if last in ('s', 'z', 'ʃ', 'ʒ'):
+    return 'ɪz'
+  if last in ('p', 't', 'k', 'f', 'θ'):
+    return 's'
+  return 'z'
+
+
 def apply_lexicon_ssml(text, lexicon):
   """Wrap known terms in SSML pronunciation tags.
 
@@ -592,19 +603,24 @@ def apply_lexicon_ssml(text, lexicon):
   # would rescan tags it had just emitted and nest <phoneme> inside a ph=""
   # attribute when one term contains another ("Pak Harto" / "Harto").
   terms = sorted(lexicon, key=len, reverse=True)
-  pattern = re.compile(r'\b(' + '|'.join(re.escape(t) for t in terms) + r')\b', re.IGNORECASE)
+  # A possessive 's (already escaped to &apos;s, or a curly ’s) goes inside the
+  # tag: left outside, Chirp reads the tagged term and then the letter "S"
+  # ("Mazu's" -> "Ma Zu S", reported by ear 2026-09-17).
+  pattern = re.compile(r'\b(' + '|'.join(re.escape(t) for t in terms) + r')((?:&apos;|’)s)?\b',
+                       re.IGNORECASE)
   lookup = {t.lower(): v for t, v in lexicon.items()}
 
   def render(m):
-    word = m.group(1)
+    word, poss = m.group(1), m.group(2) or ''
     val = lookup[word.lower()]
     if isinstance(val, dict):
-      alias = escape_ssml(str(val.get('say', '')))
+      alias = escape_ssml(str(val.get('say', '')) + ("'s" if poss else ''))
       # Leading micro-break: Chirp otherwise glues the substituted alias onto
       # the preceding word ("root dhṛ" -> "rootdree"). 50ms restores the word
       # boundary without an audible pause. Verified by ear, 2026-06-21.
-      return f'<break time="50ms"/><sub alias="{alias}">{word}</sub>'
-    return f'<phoneme alphabet="ipa" ph="{escape_ssml(str(val))}">{word}</phoneme>'
+      return f'<break time="50ms"/><sub alias="{alias}">{word}{poss}</sub>'
+    ph = str(val) + (possessive_ipa(str(val)) if poss else '')
+    return f'<phoneme alphabet="ipa" ph="{escape_ssml(ph)}">{word}{poss}</phoneme>'
 
   return pattern.sub(render, text)
 
