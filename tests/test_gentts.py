@@ -288,6 +288,13 @@ class UnspokenMarks(unittest.TestCase):
     for s in ("don't", "a dharma's failures", "the Qur'an", 'it doesn’t', "Mazu's point"):
       self.assertEqual(f(s), s)
 
+  def test_possessive_after_a_figure_stays(self):
+    f = G['strip_unspoken_marks']
+    self.assertEqual(f("which is Part 7's to answer"), "which is Part 7's to answer")
+    self.assertEqual(f("the 1960's slogans"), "the 1960's slogans")
+    # ... but a quotation mark after a figure still goes
+    self.assertEqual(f("the '1960s' slogans"), 'the 1960s slogans')
+
   def test_plural_possessive_loses_only_the_mark(self):
     self.assertEqual(G['strip_unspoken_marks']("Our species' answer"), 'Our species answer')
 
