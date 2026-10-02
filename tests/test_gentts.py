@@ -272,6 +272,43 @@ class LexiconSubstitution(unittest.TestCase):
     self.assertIn('>Chan</phoneme>&apos; is', out)
 
 
+class UnspokenMarks(unittest.TestCase):
+  """Quotation marks and word/word slashes are not speech (measured 2026-10-02:
+  Chirp 3 HD garbles the word after an opening single quote)."""
+
+  def test_single_quotation_marks_go(self):
+    f = G['strip_unspoken_marks']
+    self.assertEqual(f("into an 'us'. It"), 'into an us. It')
+    self.assertEqual(f("the 'love hormone', oxytocin"), 'the love hormone, oxytocin')
+    self.assertEqual(f('the ‘secular dharma’ of writers'), 'the secular dharma of writers')
+    self.assertEqual(f("'Quoted from the start.' Next"), 'Quoted from the start. Next')
+
+  def test_apostrophes_inside_words_stay(self):
+    f = G['strip_unspoken_marks']
+    for s in ("don't", "a dharma's failures", "the Qur'an", 'it doesn’t', "Mazu's point"):
+      self.assertEqual(f(s), s)
+
+  def test_plural_possessive_loses_only_the_mark(self):
+    self.assertEqual(G['strip_unspoken_marks']("Our species' answer"), 'Our species answer')
+
+  def test_slash_between_words_becomes_a_space(self):
+    f = G['strip_unspoken_marks']
+    self.assertEqual(f('the is/ought wall'), 'the is ought wall')
+    self.assertEqual(f('open 24/7, a 1/3 share'), 'open 24/7, a 1/3 share')
+
+  def test_pause_markers_survive(self):
+    s = '[PAUSE_LONG]\nA line.[PAUSE_MICRO] More.'
+    self.assertEqual(G['strip_unspoken_marks'](s), s)
+
+  def test_the_ssml_carries_no_quotation_marks(self):
+    from xml.dom import minidom
+    text = G['strip_unspoken_marks']("A strong 'we' is fine; a dharma's edge isn't.")
+    out = G['text_to_ssml'](text, {})
+    minidom.parseString(f'<speak>{out}</speak>')
+    self.assertEqual(out.count('&apos;'), 2)   # dharma's, isn't
+    self.assertNotIn('&apos;we', out)
+
+
 class SsmlChunkLimits(unittest.TestCase):
   """2.12: no chunk over the byte limit, no silence-only chunk."""
 

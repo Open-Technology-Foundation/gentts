@@ -193,6 +193,15 @@ parallel "that ...;" clauses dropped 240 characters on every attempt). Sentences
 240 characters therefore get a 150 ms micro-break at their own semicolons, colons and commas,
 which stabilises the model without changing the text. Other providers render it as a plain space.
 
+Also on the Google path only, single quotation marks and a slash between two words are removed
+before synthesis. Chirp 3 HD sometimes voices an opening single quote as a nonsense syllable
+(`'us'` heard as "onwari source"): measured over ten chapters, a word opening a single-quoted
+phrase carried a fault 10.8% of the time against 1.3% elsewhere, and in an A/B of the affected
+sentences 20 of 50 clips garbled with the marks and none of 50 without. An apostrophe inside a
+word (`don't`, `dharma's`, `Qur'an`) stays. `is/ought` is sent as `is ought`, since the voice
+otherwise says "slash"; figures such as `24/7` are untouched. `--dump-text` still shows the
+marks: they are punctuation, not words.
+
 ### Dumping the spoken text
 
 `--dump-text FILE` writes exactly what would be spoken — preamble included, markers replaced by
