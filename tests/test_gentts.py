@@ -255,11 +255,25 @@ class LexiconSubstitution(unittest.TestCase):
     from xml.dom import minidom
     out = G['text_to_ssml']("Mazu's point.", {'Mazu': 'ˌmɑːˈdzuː'})
     minidom.parseString(f'<speak>{out}</speak>')
-    self.assertIn('ph="ˌmɑːˈdzuːz">Mazu&apos;s</phoneme>', out)
+    self.assertIn('ph="ˌmɑːˈdzuːz">Mazus</phoneme> point', out)
 
-  def test_possessive_goes_inside_the_sub_alias(self):
+  def test_possessive_in_the_phoneme_tag_has_no_apostrophe(self):
+    # "Gotama’s" inside <phoneme> was spelt out letter by letter (Revamp, 2026-10-30)
+    out = G['text_to_ssml']('after Gotama’s death', {'Gotama': 'ˈɡoːtəmə'})
+    self.assertIn('ph="ˈɡoːtəməz">Gotamas</phoneme> death', out)
+    self.assertNotIn('’', out)
+
+  def test_respelling_is_plain_text_with_its_possessive(self):
     out = G['apply_lexicon_ssml']('Tuwhiri’s founders', {'Tuwhiri': {'say': 'Toofeeree'}})
-    self.assertIn('<sub alias="Toofeeree&apos;s">Tuwhiri’s</sub>', out)
+    self.assertEqual(out, 'Toofeeree&apos;s founders')
+
+  def test_respelling_has_no_sub_tag_or_break(self):
+    # The 50 ms break before <sub> drew junk syllables (Revamp, 2026-10-30), and it
+    # was also a <break> that chunk_ssml() could split a sentence at.
+    out = G['text_to_ssml']('the root dhṛ means', {'dhṛ': {'say': 'dree'}})
+    self.assertIn('the root dree means', out)
+    self.assertNotIn('<sub', out)
+    self.assertNotIn('time="50ms"', out)
 
   def test_possessive_ending_follows_the_last_sound(self):
     self.assertEqual(G['possessive_ipa']('ˈdɛʃɑːn'), 'z')

@@ -275,10 +275,24 @@ gentts -p compatible --url https://tts.local/v1/audio/speech \
 ```
 
 A string is IPA, emitted as `<phoneme alphabet="ipa">`. A `{"say": ...}` object is a plain
-respelling, emitted as `<sub alias>`. The respelling form exists because Chirp 3 HD's text
-normaliser spells all-consonant clusters out as initialisms and **overrides `<phoneme>` but not
-`<sub>`**. Substituted aliases also get a leading 50 ms break, or Chirp glues the alias onto the
-preceding word ("root dhṛ" → "rootdree").
+respelling, written into the text in place of the term. The respelling form exists because Chirp
+3 HD's text normaliser spells all-consonant clusters out as initialisms and **overrides
+`<phoneme>`**; a respelling gives it an ordinary word to read.
+
+A possessive goes with the term: `Mazu's` becomes `<phoneme ph="…z">Mazus</phoneme>`, the IPA
+carrying the possessive sound and the word inside the tag losing its apostrophe, and a respelling
+becomes `Toofeeree's`.
+
+Two forms gentts no longer emits, measured over the 94 respellings and 39 possessives of a
+six-hour book (Chirp 3 HD Charon, October 2026):
+
+| Was | Fault | Rate | Now |
+|-----|-------|------|-----|
+| `<break time="50ms"/><sub alias="…">` | junk syllable in the break ("the *four* Satipaṭṭhāna") | 9 in 94 | 0 in 30 |
+| `<phoneme …>Gotama’s</phoneme>` | name spelt out letter by letter | 6 in 18 non-English names | 0 in 8 |
+
+The break was there because Chirp glues a `<sub>` alias onto the preceding word ("root dhṛ" →
+"rootdree"); plain text has no alias to glue.
 
 Matching is whole-word and case-insensitive, longest term first. Keys beginning with `_` are
 comments and ignored.

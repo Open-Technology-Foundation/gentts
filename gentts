@@ -592,10 +592,11 @@ def apply_lexicon_ssml(text, lexicon):
   """Wrap known terms in SSML pronunciation tags.
 
   A string value is IPA, emitted as <phoneme alphabet="ipa" ph="...">.
-  A {"say": "..."} value is emitted as <sub alias="...">, a plain respelling,
-  for tokens Chirp 3 HD's normaliser would otherwise spell out as an initialism
-  (e.g. the Sanskrit root dhr -> "dree"): that classifier overrides <phoneme>
-  but not a <sub> respelling. Verified on en-AU-Chirp3-HD-Charon, 2026-06-21.
+  A {"say": "..."} value is a plain respelling, written into the text in place
+  of the term, for tokens Chirp 3 HD's normaliser would otherwise spell out as
+  an initialism (e.g. the Sanskrit root dhr -> "dree"): that classifier
+  overrides <phoneme>, and a respelling leaves it nothing to spell. Verified on
+  en-AU-Chirp3-HD-Charon, 2026-06-21.
   """
   if not lexicon:
     return text
@@ -614,13 +615,18 @@ def apply_lexicon_ssml(text, lexicon):
     word, poss = m.group(1), m.group(2) or ''
     val = lookup[word.lower()]
     if isinstance(val, dict):
-      alias = escape_ssml(str(val.get('say', '')) + ("'s" if poss else ''))
-      # Leading micro-break: Chirp otherwise glues the substituted alias onto
-      # the preceding word ("root dhṛ" -> "rootdree"). 50ms restores the word
-      # boundary without an audible pause. Verified by ear, 2026-06-21.
-      return f'<break time="50ms"/><sub alias="{alias}">{word}{poss}</sub>'
+      # Plain text, not <sub alias>. Chirp glued a <sub> alias onto the word
+      # before it ("root dhṛ" -> "rootdree", 2026-06-21), and the 50 ms break
+      # that cured that drew a junk syllable of its own: 9 of 94 respellings
+      # in Revamp ("the four Satipaṭṭhāna"), against 0 of 30 as plain text,
+      # which needs neither tag nor break. Measured 2026-10-30, medium.en.
+      return escape_ssml(str(val.get('say', '')) + ("'s" if poss else ''))
     ph = str(val) + (possessive_ipa(str(val)) if poss else '')
-    return f'<phoneme alphabet="ipa" ph="{escape_ssml(ph)}">{word}{poss}</phoneme>'
+    # A possessive is spoken from the IPA; the word inside the tag keeps its s
+    # (poss[-1:]) but not the apostrophe. "Gotama’s" in <phoneme> was spelt out
+    # letter by letter in 6 of 18 foreign names (Batchelor’s: 0 of 21), and in
+    # 0 of 8 as "Gotamas". Measured in Revamp 2026-10-30, medium.en.
+    return f'<phoneme alphabet="ipa" ph="{escape_ssml(ph)}">{word}{poss[-1:]}</phoneme>'
 
   return pattern.sub(render, text)
 
